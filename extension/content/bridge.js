@@ -17,6 +17,55 @@
     } catch (err) {}
   }
 
+  function extractUrlFromBackgroundImage(backgroundImage) {
+    var value = String(backgroundImage || '');
+    var match = value.match(/url\((['"]?)(.*?)\1\)/i);
+    return match ? String(match[2] || '').trim() : '';
+  }
+
+  function isImageLikeTarget(target) {
+    if (!target || target.nodeType !== 1) return false;
+    if (target.closest('img')) return true;
+    var block = target.closest(
+      '[data-block-type="image"], [data-page-block-type="image"], '
+      + '.block-image, .image-block, [class*="ImageBlock"], [class*="image-block"], '
+      + '[class*="image-content"], [class*="ImgContainer"], [class*="img-container"], '
+      + '[class*="image-wrap"], [class*="imageWrap"]'
+    );
+    if (block && block.querySelector('img')) return true;
+    var el = target;
+    while (el && el !== document.documentElement) {
+      if (el.nodeType === 1 && extractUrlFromBackgroundImage(getComputedStyle(el).backgroundImage || '')) return true;
+      el = el.parentElement;
+    }
+    return false;
+  }
+
+  function isImageLikePoint(event) {
+    if (isImageLikeTarget(event.target)) return true;
+    if (typeof document.elementsFromPoint !== 'function') return false;
+    var stack = document.elementsFromPoint(event.clientX, event.clientY) || [];
+    for (var i = 0; i < stack.length; i++) {
+      if (isImageLikeTarget(stack[i])) return true;
+    }
+    return false;
+  }
+
+  function isRightButton(event) {
+    return event.button === 2 || (event.buttons != null && event.buttons === 2);
+  }
+
+  function suppressFeishuImageRightButton(event) {
+    if (!isRightButton(event) || !isImageLikePoint(event)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    event.stopPropagation();
+  }
+
+  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'auxclick'].forEach(function (type) {
+    window.addEventListener(type, suppressFeishuImageRightButton, true);
+  });
+
   // 转发页面运行时的实时进度到 popup / service worker（供关闭后重开恢复进度）。
   document.addEventListener(UI_PROGRESS_EVENT, function (event) {
     if (!activeRequestId) return;

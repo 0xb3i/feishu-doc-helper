@@ -135,3 +135,18 @@ test('image metrics use the same docx record source as paste payloads', () => {
   assert.match(mainWorld, /imageCount: Number\(snapshot\.imageCount \|\| 0\)/);
   assert.doesNotMatch(mainWorld, /imageCount: scanned\.length/);
 });
+
+test('image right-click is suppressed in the isolated bridge before Feishu handlers', () => {
+  fs.rmSync(DIST, { recursive: true, force: true });
+  const result = spawnSync('npm', ['run', 'build:feishu:extension'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+
+  const bridge = fs.readFileSync(path.join(DIST, 'content/bridge.js'), 'utf8');
+  assert.match(bridge, /function suppressFeishuImageRightButton/);
+  assert.match(bridge, /window\.addEventListener\(type, suppressFeishuImageRightButton, true\)/);
+  assert.match(bridge, /event\.stopImmediatePropagation\(\)/);
+  assert.match(bridge, /\[data-block-type="image"\]/);
+});
