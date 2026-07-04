@@ -55,6 +55,166 @@
     return markdownCount > 0 ? markdownCount : countDocumentImagesInHtml(c.html);
   }
 
+  function normalizePasteTitle(title) {
+    return String(title || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function contentStartsWithTitle(content, title) {
+    var firstLine = String((content && content.text) || '').split('\n').map(function (line) {
+      return line.replace(/^#+\s*/, '').trim();
+    }).filter(Boolean)[0] || '';
+    return firstLine === title;
+  }
+
+  function buildPlainTextSnapshot(text, type) {
+    return {
+      type: type || 'text',
+      text: {
+        initialAttributedTexts: {
+          text: { 0: text },
+          attribs: { 0: '' },
+        },
+        apool: { numToAttrib: {} },
+      },
+    };
+  }
+
+  function prependTitleToDocxRecord(raw, title) {
+    if (!raw || !title) return raw || '';
+    try {
+      var record = JSON.parse(raw);
+      if (!record || !record.recordMap || !Array.isArray(record.recordIds)) return raw;
+      var titleRecordId = docxRecord.generateRandomId();
+      record.recordMap[titleRecordId] = {
+        id: titleRecordId,
+        snapshot: buildPlainTextSnapshot(title, 'heading1'),
+      };
+      record.recordIds = [titleRecordId].concat(record.recordIds);
+      record.blockIds = [1].concat((record.blockIds || []).map(function (id) { return Number(id || 0) + 1; }));
+      record.selection = record.recordIds.map(function (recordId, index) {
+        return { id: index + 2, type: 'block', recordId: recordId };
+      });
+      return JSON.stringify(record);
+    } catch (error) {
+      return raw;
+    }
+  }
+
+  function prependTitleToContent(content, title) {
+    var cleanTitle = normalizePasteTitle(title);
+    if (!content || !cleanTitle || contentStartsWithTitle(content, cleanTitle)) return content;
+    var next = Object.assign({}, content);
+    next.html = '<h1>' + attribs.escapeHtml(cleanTitle) + '</h1>\n' + String(next.html || '');
+    if (next.clipboardHtml) {
+      next.clipboardHtml = '<h1>' + attribs.escapeHtml(cleanTitle) + '</h1>\n' + String(next.clipboardHtml || '');
+    }
+    next.text = '# ' + cleanTitle + '\n\n' + String(next.text || '');
+    next.blockCount = Number(next.blockCount || 0) + 1;
+    next.docxRecord = prependTitleToDocxRecord(next.docxRecord, cleanTitle);
+    return next;
+  }
+
+  function isUntitledDocumentTitle(text) {
+    return !String(text || '').trim() || /^(未命名文档|Untitled)(\s*-\s*(飞书云文档|Lark))?$/i.test(String(text || '').trim());
+  }
+
+  function getEditableText(el) {
+    if (!el) return '';
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return String(el.value || '');
+    return String(el.innerText || el.textContent || '');
+  }
+
+  function setEditableText(el, text) {
+    if (!el) return false;
+    try {
+      el.focus();
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(el, text);
+      } else {
+        var selection = window.getSelection && window.getSelection();
+        var range = document.createRange();
+        range.selectNodeContents(el);
+        if (selection) {
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        if (!document.execCommand || !document.execCommand('insertText', false, text)) {
+          el.textContent = text;
+        }
+      }
+      ['beforeinput', 'input'].forEach(function (type) {
+        el.dispatchEvent(new InputEvent(type, { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+      });
+      el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      el.blur();
+      return getEditableText(el).trim() === text;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function findDocumentTitleEditor() {
+    var contentRoot = getContentRootElement();
+    var contentTop = contentRoot && contentRoot.getBoundingClientRect ? contentRoot.getBoundingClientRect().top : Infinity;
+    var nodes = Array.prototype.slice.call(document.querySelectorAll('input, textarea, [contenteditable="true"], [contenteditable="plaintext-only"]'), 0, 120);
+    var best = null;
+    var bestScore = -Infinity;
+    nodes.forEach(function (node) {
+      if (!node || node === document.body || (contentRoot && contentRoot.contains(node))) return;
+      var rect = node.getBoundingClientRect ? node.getBoundingClientRect() : { width: 0, height: 0, top: 9999 };
+      if (rect.width < 160 || rect.height < 16 || rect.top > contentTop + 20) return;
+      var haystack = [
+        node.id,
+        node.className,
+        node.getAttribute && node.getAttribute('placeholder'),
+        node.getAttribute && node.getAttribute('aria-label'),
+        node.getAttribute && node.getAttribute('data-placeholder'),
+        node.getAttribute && node.getAttribute('data-testid'),
+      ].join(' ');
+      var value = getEditableText(node).trim();
+      var score = 0;
+      if (/title|标题|document-name|doc-name/i.test(haystack)) score += 8;
+      if (isUntitledDocumentTitle(value)) score += 6;
+      if (rect.top < Math.max(contentTop, 240)) score += 4;
+      score += Math.min(rect.width, 800) / 200;
+      if (score > bestScore) {
+        bestScore = score;
+        best = node;
+      }
+    });
+    return bestScore >= 8 ? best : null;
+  }
+
+  function applyDocumentTitleToCurrentDoc(title) {
+    var cleanTitle = normalizePasteTitle(title);
+    if (!cleanTitle) return Promise.resolve(false);
+    var editor = findDocumentTitleEditor();
+    return Promise.resolve(editor ? setEditableText(editor, cleanTitle) : false);
+  }
+
+  function saveCurrentSelection() {
+    var selection = window.getSelection && window.getSelection();
+    var ranges = [];
+    if (selection) {
+      for (var i = 0; i < selection.rangeCount; i++) ranges.push(selection.getRangeAt(i).cloneRange());
+    }
+    return { activeElement: document.activeElement, ranges: ranges };
+  }
+
+  function restoreCurrentSelection(saved) {
+    if (!saved) return;
+    try {
+      if (saved.activeElement && typeof saved.activeElement.focus === 'function') saved.activeElement.focus();
+      var selection = window.getSelection && window.getSelection();
+      if (selection && saved.ranges && saved.ranges.length) {
+        selection.removeAllRanges();
+        saved.ranges.forEach(function (range) { selection.addRange(range); });
+      }
+    } catch (error) {}
+  }
+
   function buildSemanticSnapshotForRoot(rootBlock, surface) {
     var primary = snapshotCollector.collectFromStructService(rootBlock, {
       calloutStyleResolver: extractCalloutStyleFromDOM,
@@ -704,7 +864,11 @@
       if (!pending.clipboardHtml && pending.html) {
         showToast('⏳ 准备粘贴内容中...', 0);
       }
-      return commitPaste(pending, {});
+      var savedSelection = saveCurrentSelection();
+      return applyDocumentTitleToCurrentDoc(pending.title).then(function (titleApplied) {
+        restoreCurrentSelection(savedSelection);
+        return commitPaste(titleApplied ? pending : prependTitleToContent(pending, pending.title), {});
+      });
     });
   }
 

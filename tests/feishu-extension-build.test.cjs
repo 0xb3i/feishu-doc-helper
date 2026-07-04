@@ -150,3 +150,20 @@ test('image right-click is suppressed in the isolated bridge before Feishu handl
   assert.match(bridge, /event\.stopImmediatePropagation\(\)/);
   assert.match(bridge, /\[data-block-type="image"\]/);
 });
+
+test('paste flow carries the source document title into the target title slot', () => {
+  fs.rmSync(DIST, { recursive: true, force: true });
+  const result = spawnSync('npm', ['run', 'build:feishu:extension'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+
+  const mainWorld = fs.readFileSync(path.join(DIST, 'content/main-world.js'), 'utf8');
+  assert.match(mainWorld, /function applyDocumentTitleToCurrentDoc/);
+  assert.match(mainWorld, /function findDocumentTitleEditor/);
+  assert.match(mainWorld, /function saveCurrentSelection/);
+  assert.match(mainWorld, /restoreCurrentSelection\(savedSelection\)/);
+  assert.match(mainWorld, /titleApplied \? pending : prependTitleToContent\(pending, pending\.title\)/);
+  assert.match(mainWorld, /snapshot: buildPlainTextSnapshot\(title, 'heading1'\)/);
+});
