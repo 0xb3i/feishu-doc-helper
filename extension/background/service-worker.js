@@ -2,7 +2,9 @@ var SOURCE = 'FEISHU_EXTENSION_UI';
 var PROGRESS_MESSAGE = 'FEISHU_EXTENSION_PROGRESS';
 var PROGRESS_QUERY = 'FEISHU_EXTENSION_PROGRESS_QUERY';
 var IMAGE_FETCH = 'FEISHU_EXTENSION_IMAGE_FETCH';
+var PENDING_PASTE = 'FEISHU_EXTENSION_PENDING_PASTE';
 var STORAGE_PREFIX = 'feishu-progress:';
+var PENDING_PASTE_KEY = 'feishu-pending-paste';
 
 var MENU_ITEMS = [
   { id: 'extract', title: '提取当前文档' },
@@ -65,8 +67,43 @@ function readProgress(tabId, callback) {
   }
 }
 
+function getLocalArea() {
+  return chrome.storage && chrome.storage.local ? chrome.storage.local : null;
+}
+
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (!message) return false;
+
+  if (message.source === PENDING_PASTE) {
+    var localArea = getLocalArea();
+    if (!localArea) { sendResponse({ ok: false, error: 'storage unavailable' }); return false; }
+    if (message.op === 'get') {
+      localArea.get(PENDING_PASTE_KEY, function (items) {
+        var err = chrome.runtime.lastError;
+        if (err) { sendResponse({ ok: false, error: err.message }); return; }
+        sendResponse({ ok: true, value: (items && items[PENDING_PASTE_KEY]) || null });
+      });
+      return true;
+    }
+    if (message.op === 'set') {
+      var data = {};
+      data[PENDING_PASTE_KEY] = message.value || null;
+      localArea.set(data, function () {
+        var err = chrome.runtime.lastError;
+        sendResponse(err ? { ok: false, error: err.message } : { ok: true });
+      });
+      return true;
+    }
+    if (message.op === 'delete') {
+      localArea.remove(PENDING_PASTE_KEY, function () {
+        var err = chrome.runtime.lastError;
+        sendResponse(err ? { ok: false, error: err.message } : { ok: true });
+      });
+      return true;
+    }
+    sendResponse({ ok: false, error: 'unsupported op' });
+    return false;
+  }
 
   // 后台跨域抓取图片字节（拥有 host_permissions，不受页面 CORS 限制），
   // 模拟浏览器原生"复制图片"，把结果以 data URL 回传给内容脚本写剪贴板。

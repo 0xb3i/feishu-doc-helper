@@ -5,6 +5,7 @@
   var UI_RESULT_EVENT = 'feishu-helper:ui-result';
   var UI_PROGRESS_EVENT = 'feishu-helper:ui-progress';
   var PROGRESS_MESSAGE = 'FEISHU_EXTENSION_PROGRESS';
+  var PENDING_PASTE_MESSAGE = 'FEISHU_EXTENSION_PENDING_PASTE';
 
   // 当前进行中的动作 requestId / 名称，用于把页面进度事件关联到本次操作。
   var activeRequestId = '';
@@ -50,6 +51,35 @@
     }
     try {
       chrome.runtime.sendMessage({ source: IMAGE_FETCH_MESSAGE, url: url }, function (response) {
+        if (chrome.runtime.lastError) {
+          reply({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        reply(response || { ok: false, error: 'no response' });
+      });
+    } catch (err) {
+      reply({ ok: false, error: String(err && err.message || err) });
+    }
+  }, true);
+
+  var PENDING_PASTE_EVENT = 'feishu-helper:pending-paste';
+  var PENDING_PASTE_RESULT_EVENT = 'feishu-helper:pending-paste-result';
+
+  document.addEventListener(PENDING_PASTE_EVENT, function (event) {
+    var detail = (event && event.detail) || {};
+    var requestId = String(detail.requestId || '');
+    if (!requestId) return;
+    function reply(result) {
+      document.dispatchEvent(new CustomEvent(PENDING_PASTE_RESULT_EVENT, {
+        detail: Object.assign({ requestId: requestId }, result),
+      }));
+    }
+    try {
+      chrome.runtime.sendMessage({
+        source: PENDING_PASTE_MESSAGE,
+        op: String(detail.op || ''),
+        value: detail.value || null,
+      }, function (response) {
         if (chrome.runtime.lastError) {
           reply({ ok: false, error: chrome.runtime.lastError.message });
           return;

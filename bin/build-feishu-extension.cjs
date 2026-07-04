@@ -140,7 +140,7 @@ function buildManifest(packageJson) {
     name: '飞书文档助手',
     version: String(packageJson.version || '1.0.0'),
     description: '飞书文档复制、粘贴与图片提取菜单',
-    permissions: ['storage', 'contextMenus', 'commands'],
+    permissions: ['storage', 'unlimitedStorage', 'contextMenus', 'commands'],
     host_permissions: MATCHES.concat(IMAGE_HOSTS),
     icons: {
       16: 'icons/icon-16.png',

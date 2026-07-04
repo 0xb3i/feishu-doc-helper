@@ -45,6 +45,8 @@
   var DB_STORE = 'paste';
   var DB_KEY = 'pending';
   var SHARED_PENDING_PASTE_KEY = '__feishu_helper_pending_paste__';
+  var EXTENSION_PENDING_PASTE_EVENT = 'feishu-helper:pending-paste';
+  var EXTENSION_PENDING_PASTE_RESULT_EVENT = 'feishu-helper:pending-paste-result';
 
   // ── Runtime registry & DOM bridge ──────────────────────────────────────────
 

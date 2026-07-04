@@ -665,7 +665,7 @@
     return getPendingPaste().then(function (pending) {
       if (!pending) {
         showToast('⚠️ 请先在源文档按 Cmd+Shift+D 提取');
-        return null;
+        throw new Error('请先在源文档按 Cmd+Shift+D 提取');
       }
       if (!pending.clipboardHtml && pending.html) {
         showToast('⏳ 准备粘贴内容中...', 0);

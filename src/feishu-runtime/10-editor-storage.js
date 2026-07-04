@@ -271,6 +271,45 @@
     catch (e) {}
   }
 
+  function requestExtensionPendingPaste(op, value) {
+    return new Promise(function (resolve) {
+      var requestId = 'pending-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      var timer = setTimeout(function () {
+        document.removeEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
+        resolve(null);
+      }, 2000);
+      function onResult(event) {
+        var detail = (event && event.detail) || {};
+        if (detail.requestId !== requestId) return;
+        clearTimeout(timer);
+        document.removeEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
+        resolve(detail && detail.ok ? detail.value || null : null);
+      }
+      document.addEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
+      try {
+        document.dispatchEvent(new CustomEvent(EXTENSION_PENDING_PASTE_EVENT, {
+          detail: { requestId: requestId, op: op, value: value || null },
+        }));
+      } catch (error) {
+        clearTimeout(timer);
+        document.removeEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
+        resolve(null);
+      }
+    });
+  }
+
+  function getExtensionPendingPaste() {
+    return requestExtensionPendingPaste('get').then(clonePendingPasteData);
+  }
+
+  function setExtensionPendingPaste(data) {
+    return requestExtensionPendingPaste('set', clonePendingPasteData(data));
+  }
+
+  function deleteExtensionPendingPaste() {
+    return requestExtensionPendingPaste('delete');
+  }
+
   function openDB() {
     return new Promise(function (resolve, reject) {
       var req = indexedDB.open(DB_NAME, 1);
@@ -313,37 +352,47 @@
     });
   }
 
-  // The IndexedDB cache and the GM-shared cache may both contain stale entries;
-  // we always pick the freshest one, then mirror it back so both sides agree.
+  // The page IndexedDB, legacy GM cache and extension cache may all contain
+  // stale entries; pick the freshest one, then mirror it back so both sides agree.
   function getPendingPaste() {
     return getLocalPendingPaste().then(function (localData) {
-      var sharedData = getSharedPendingPaste();
-      if (!isPendingPasteFresh(sharedData)) {
-        if (sharedData) deleteSharedPendingPaste();
-        sharedData = null;
-      }
-      var chosen = localData;
-      if (sharedData && (!chosen || Number(sharedData.ts || 0) > Number(chosen.ts || 0))) {
-        chosen = sharedData;
-      }
-      if (chosen && chosen !== localData) {
-        return setLocalPendingPaste(chosen).catch(function () {}).then(function () {
+      return getExtensionPendingPaste().then(function (extensionData) {
+        var sharedData = getSharedPendingPaste();
+        if (!isPendingPasteFresh(sharedData)) {
+          if (sharedData) deleteSharedPendingPaste();
+          sharedData = null;
+        }
+        if (!isPendingPasteFresh(extensionData)) {
+          if (extensionData) deleteExtensionPendingPaste();
+          extensionData = null;
+        }
+        var chosen = localData;
+        if (sharedData && (!chosen || Number(sharedData.ts || 0) > Number(chosen.ts || 0))) {
+          chosen = sharedData;
+        }
+        if (extensionData && (!chosen || Number(extensionData.ts || 0) > Number(chosen.ts || 0))) {
+          chosen = extensionData;
+        }
+        if (!chosen) return ensureUploadedTokenMapMatchesPending(null);
+        setSharedPendingPaste(chosen);
+        return Promise.all([
+          chosen === localData ? Promise.resolve() : setLocalPendingPaste(chosen).catch(function () {}),
+          chosen === extensionData ? Promise.resolve() : setExtensionPendingPaste(chosen).catch(function () {}),
+        ]).then(function () {
           return ensureUploadedTokenMapMatchesPending(chosen);
         });
-      }
-      return ensureUploadedTokenMapMatchesPending(chosen);
+      });
     }).catch(function () { return null; });
   }
 
   function setPendingPaste(data) {
-    return openDB().then(function () {
-      return new Promise(function (resolve, reject) {
-        data.ts = Date.now();
-        data.savedFromHost = location.host;
-        data.savedFromHref = location.href;
-        setDocAttr('data-feishu-pending-paste-ts', String(data.ts));
-        setSharedPendingPaste(data);
-        setLocalPendingPaste(data).then(resolve).catch(reject);
-      });
-    }).catch(function () {});
+    data.ts = Date.now();
+    data.savedFromHost = location.host;
+    data.savedFromHref = location.href;
+    setDocAttr('data-feishu-pending-paste-ts', String(data.ts));
+    setSharedPendingPaste(data);
+    return Promise.all([
+      setLocalPendingPaste(data).catch(function () {}),
+      setExtensionPendingPaste(data).catch(function () {}),
+    ]).then(function () {});
   }

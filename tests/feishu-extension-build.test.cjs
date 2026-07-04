@@ -22,7 +22,7 @@ test('build:feishu:extension emits a loadable MV3 extension with a popup dashboa
   assert.equal(manifest.name, '飞书文档助手');
   assert.equal(manifest.action.default_popup, 'ui/popup.html');
   assert.equal(manifest.side_panel, undefined);
-  assert.deepEqual(manifest.permissions.sort(), ['commands', 'contextMenus', 'storage'].sort());
+  assert.deepEqual(manifest.permissions.sort(), ['commands', 'contextMenus', 'storage', 'unlimitedStorage'].sort());
   assert.ok(manifest.host_permissions.includes('https://*.feishu.cn/*'));
   assert.ok(manifest.host_permissions.includes('https://*.larksuite.com/*'));
   assert.ok(manifest.host_permissions.includes('https://*.larkoffice.com/*'));
@@ -97,4 +97,25 @@ test('extension bridge exposes first-class UI actions instead of simulating shor
   assert.match(bridge, /chrome\.runtime\.onMessage\.addListener/);
   assert.match(bridge, /document\.dispatchEvent\(new CustomEvent\('feishu-helper:ui-action'/);
   assert.match(popup, /FEISHU_EXTENSION_UI/);
+});
+
+test('pending paste is shared through extension storage and missing cache fails visibly', () => {
+  fs.rmSync(DIST, { recursive: true, force: true });
+  const result = spawnSync('npm', ['run', 'build:feishu:extension'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+
+  const mainWorld = fs.readFileSync(path.join(DIST, 'content/main-world.js'), 'utf8');
+  const bridge = fs.readFileSync(path.join(DIST, 'content/bridge.js'), 'utf8');
+  const serviceWorker = fs.readFileSync(path.join(DIST, 'background/service-worker.js'), 'utf8');
+
+  assert.match(mainWorld, /feishu-helper:pending-paste/);
+  assert.match(mainWorld, /getExtensionPendingPaste\(\)/);
+  assert.match(mainWorld, /setExtensionPendingPaste\(data\)/);
+  assert.match(mainWorld, /throw new Error\('请先在源文档按 Cmd\+Shift\+D 提取'\)/);
+  assert.match(bridge, /FEISHU_EXTENSION_PENDING_PASTE/);
+  assert.match(serviceWorker, /chrome\.storage\.local/);
+  assert.match(serviceWorker, /feishu-pending-paste/);
 });
