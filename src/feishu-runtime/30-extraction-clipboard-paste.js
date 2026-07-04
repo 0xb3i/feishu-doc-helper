@@ -9,6 +9,32 @@
     return (String(html || '').match(/<img\b[^>]+src=["'][^"']*\/space\/api\/box\/stream\/download\//gi) || []).length;
   }
 
+  function listImageRecordsFromDocxRecord(raw) {
+    if (!raw) return [];
+    try {
+      var parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return docxRecord.listImageRecords(parsed).filter(function (entry) {
+        return entry && entry.image && entry.image.token;
+      });
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function buildImageEntriesFromDocxRecord(raw) {
+    return listImageRecordsFromDocxRecord(raw).map(function (entry) {
+      var image = entry.image || {};
+      var token = String(image.token || '');
+      return {
+        src: location.origin + '/space/api/box/stream/download/preview/' + encodeURIComponent(token) + '/?preview_type=16',
+        alt: String(image.name || ''),
+        width: Number(image.width || 0),
+        height: Number(image.height || 0),
+        token: token,
+      };
+    });
+  }
+
   function countFallbackEquationNodes(root) {
     if (!root || typeof root.querySelectorAll !== 'function') return 0;
     return Math.max(
@@ -22,6 +48,9 @@
 
   function countExtractedImages(content) {
     var c = content || {};
+    var recordCount = listImageRecordsFromDocxRecord(c.docxRecord).length;
+    if (recordCount > 0) return recordCount;
+    if (Number(c.imageCount || 0) > 0) return Number(c.imageCount || 0);
     var markdownCount = (String(c.text || '').match(/!\[/g) || []).length;
     return markdownCount > 0 ? markdownCount : countDocumentImagesInHtml(c.html);
   }
@@ -66,12 +95,14 @@
       return extractVisibleDomFallback();
     }
     var docxRecordPayload = renderer.buildDocxRecordPayload(ss.rootBlock, { maxDepth: MAX_BLOCK_DEPTH });
+    var docxRecordRaw = docxRecordPayload ? JSON.stringify(docxRecordPayload) : '';
     return {
       html: finalHtml,
       text: finalText,
       blockCount: rendered.blockCount,
       equationCount: rendered.equationCount,
-      docxRecord: docxRecordPayload ? JSON.stringify(docxRecordPayload) : '',
+      imageCount: listImageRecordsFromDocxRecord(docxRecordRaw).length || countDocumentImagesInHtml(finalHtml),
+      docxRecord: docxRecordRaw,
     };
   }
 
@@ -80,6 +111,9 @@
     if (!content) return null;
     var ss = getStructService();
     var surface = getValidationSurfaceElement() || getContentRootElement() || document.querySelector(EDITABLE_SELECTOR) || document.body;
+    var semanticSnapshot = ss && ss.rootBlock
+      ? buildSemanticSnapshotForRoot(ss.rootBlock, surface)
+      : snapshotCollector.collectFromDom(surface);
     var snapshot = {
       title: getDocumentTitle(),
       text: String(content.text || ''),
@@ -87,14 +121,14 @@
       htmlLength: String(content.html || '').length,
       blockCount: Number(content.blockCount || 0),
       equationCount: Number(content.equationCount || 0),
-      semanticSnapshot: ss && ss.rootBlock
-        ? buildSemanticSnapshotForRoot(ss.rootBlock, surface)
-        : snapshotCollector.collectFromDom(surface),
+      imageCount: countExtractedImages(content) || Number(semanticSnapshot && semanticSnapshot.componentCounts && semanticSnapshot.componentCounts.image || 0),
+      semanticSnapshot: semanticSnapshot,
     };
     setDocJsonAttr('data-feishu-validation-snapshot', {
       title: snapshot.title,
       blockCount: snapshot.blockCount,
       equationCount: snapshot.equationCount,
+      imageCount: snapshot.imageCount,
       textLength: snapshot.textLength,
       htmlLength: snapshot.htmlLength,
       semanticSnapshot: snapshot.semanticSnapshot,

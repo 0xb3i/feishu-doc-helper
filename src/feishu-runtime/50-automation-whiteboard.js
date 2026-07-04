@@ -39,11 +39,10 @@
     if (name === 'snapshot') return Promise.resolve(captureValidationSnapshot());
     if (name === 'scan') {
       var snapshot = captureValidationSnapshot() || {};
-      var scanned = extractImages();
       return Promise.resolve({
         blockCount: Number(snapshot.blockCount || 0),
         equationCount: Number(snapshot.equationCount || 0),
-        imageCount: scanned.length,
+        imageCount: Number(snapshot.imageCount || 0),
       });
     }
     if (name === 'images') {

@@ -119,3 +119,19 @@ test('pending paste is shared through extension storage and missing cache fails 
   assert.match(serviceWorker, /chrome\.storage\.local/);
   assert.match(serviceWorker, /feishu-pending-paste/);
 });
+
+test('image metrics use the same docx record source as paste payloads', () => {
+  fs.rmSync(DIST, { recursive: true, force: true });
+  const result = spawnSync('npm', ['run', 'build:feishu:extension'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+
+  const mainWorld = fs.readFileSync(path.join(DIST, 'content/main-world.js'), 'utf8');
+  assert.match(mainWorld, /function listImageRecordsFromDocxRecord/);
+  assert.match(mainWorld, /function buildImageEntriesFromDocxRecord/);
+  assert.match(mainWorld, /imageCount: countExtractedImages\(content\)/);
+  assert.match(mainWorld, /imageCount: Number\(snapshot\.imageCount \|\| 0\)/);
+  assert.doesNotMatch(mainWorld, /imageCount: scanned\.length/);
+});

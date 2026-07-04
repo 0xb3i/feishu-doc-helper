@@ -89,7 +89,7 @@
     return closeIndex > -1 ? remainder.slice(0, closeIndex).trim() : '';
   }
 
-  function extractImages() {
+  function extractDomImages() {
     var images = [];
     var seen = new Set();
     document.querySelectorAll('img').forEach(function (img) {
@@ -117,6 +117,13 @@
       }
     });
     return images;
+  }
+
+  function extractImages() {
+    var content = null;
+    try { content = extractFullDoc(); } catch (error) {}
+    var modelImages = content ? buildImageEntriesFromDocxRecord(content.docxRecord) : [];
+    return modelImages.length ? modelImages : extractDomImages();
   }
 
   function ensureImagePanelStyles() {
