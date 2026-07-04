@@ -1,0 +1,28 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B94FF"/>
+      <stop offset="1" stop-color="#1677FF"/>
+    </linearGradient>
+    <filter id="ds" x="-20%" y="-10%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#0A4FBF" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- 圆角方底（满铺画布） -->
+  <rect x="0" y="0" width="128" height="128" rx="30" fill="url(#bg)"/>
+  <rect x="0" y="0" width="128" height="128" rx="30" fill="#ffffff" opacity="0.06"/>
+
+  <!-- 文档 -->
+  <g filter="url(#ds)">
+    <path d="M34 20h38.7a8 8 0 0 1 5.66 2.34l21.3 21.3A8 8 0 0 1 102 49.3V100a8 8 0 0 1-8 8H34a8 8 0 0 1-8-8V28a8 8 0 0 1 8-8z" fill="#ffffff"/>
+  </g>
+  <!-- 折角 -->
+  <path d="M73 21v18a5 5 0 0 0 5 5h18" stroke="#BFD9FF" stroke-width="4.4" stroke-linejoin="round" fill="none"/>
+
+  <!-- 提取箭头（呼应“提取文档”主功能） -->
+  <g stroke="#1677FF" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M64 56v30"/>
+    <path d="M50 73l14 14 14-14"/>
+  </g>
+</svg>
