@@ -1,5 +1,15 @@
   // ── Editor element discovery ───────────────────────────────────────────────
 
+  function isSupportedDocumentPage() {
+    return location.protocol === 'https:' && /^\/(?:docx|wiki|doc)\/[A-Za-z0-9]+(?:[/?#]|$)/.test(location.pathname + location.search + location.hash);
+  }
+
+  function isVisibleElement(el) {
+    if (!el || el.nodeType !== 1 || typeof el.getBoundingClientRect !== 'function') return false;
+    var rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
   function scoreEditableRootCandidate(node) {
     if (!node || node.nodeType !== 1) return -Infinity;
     var rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 };
@@ -34,35 +44,74 @@
     return bestNode;
   }
 
+  function pickDocumentBodyEditor() {
+    var shell = document.querySelector('[data-content-editable-root="true"].page-block, [data-content-editable-root="true"].root-block, .page-block.root-block');
+    if (!shell || typeof shell.getBoundingClientRect !== 'function') return null;
+    var shellRect = shell.getBoundingClientRect();
+    var candidates = Array.prototype.slice.call(shell.querySelectorAll('.zone-container.text-editor[contenteditable="true"]'), 0, 24)
+      .filter(function (node) {
+        if (!isVisibleElement(node) || typeof node.getBoundingClientRect !== 'function') return false;
+        var rect = node.getBoundingClientRect();
+        return rect.top > shellRect.top + 120;
+      });
+    return candidates.length ? pickBestNode(candidates) : null;
+  }
+
   function getContentRootElement() {
-    var nodes = Array.prototype.slice.call(document.querySelectorAll(EDITABLE_SELECTOR), 0, 24);
+    if (!isSupportedDocumentPage()) return null;
+    var bodyEditor = pickDocumentBodyEditor();
+    if (bodyEditor) return bodyEditor;
+    var nodes = Array.prototype.slice.call(document.querySelectorAll(CONTENT_ROOT_SELECTOR), 0, 24)
+      .filter(function (node) {
+        if (!isVisibleElement(node)) return false;
+        if (node.matches('.page-block, .root-block, .editor-kit-container')) return true;
+        return !!node.querySelector('[data-block-type], .zone-container.text-editor[contenteditable="true"]');
+      });
     return pickBestNode(nodes);
   }
 
-  function getValidationSurfaceElement() {
-    var seen = [];
-    function push(node) {
-      if (node && node.nodeType === 1 && seen.indexOf(node) === -1) seen.push(node);
+  function normalizeVisibleEditorText(text) {
+    return String(text || '')
+      .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function isVisibleDocumentBodyEmpty() {
+    var shell = document.querySelector('[data-content-editable-root="true"].page-block, [data-content-editable-root="true"].root-block, .page-block.root-block');
+    var root = shell || getContentRootElement();
+    if (!root) return false;
+    var bodyEditors = shell
+      ? Array.prototype.slice.call(shell.querySelectorAll('.zone-container.text-editor[contenteditable="true"]'), 0, 120)
+      : (root.matches && root.matches('.zone-container.text-editor') ? [root] : []);
+    if (!bodyEditors.length) return false;
+    for (var i = 0; i < bodyEditors.length; i++) {
+      var editor = bodyEditors[i];
+      if (!isVisibleElement(editor)) continue;
+      if (normalizeVisibleEditorText(editor.innerText || editor.textContent || '')) return false;
     }
-    push(getContentRootElement());
-    push(document.querySelector('main'));
-    push(document.querySelector('[role="main"]'));
-    Array.prototype.slice.call(document.querySelectorAll('[class*="wiki"], [class*="doc"], [class*="editor"], [data-page-id], [data-block-type]'), 0, 24).forEach(push);
-    push(document.body);
-    if (!seen.length) return null;
-    var bestNode = seen[0];
-    var bestScore = -Infinity;
+    var meaningfulNodes = root.querySelectorAll([
+      'img',
+      'table',
+      'blockquote',
+      'pre',
+      'hr',
+      '[data-block-type="image"]',
+      '[data-block-type="table"]',
+      '[data-block-type="callout"]',
+      '.docx-callout-block',
+      '.callout-container',
+      '.callout-block',
+      '[class*="code-block"]',
+      '[class*="whiteboard"]',
+    ].join(','));
+    return meaningfulNodes.length === 0;
+  }
+
+  function getValidationSurfaceElement() {
     var contentRoot = getContentRootElement();
-    seen.forEach(function (node) {
-      var score = scoreEditableRootCandidate(node);
-      if (node === document.body) score -= 8;
-      if (node === contentRoot) score += 4;
-      if (score > bestScore) {
-        bestScore = score;
-        bestNode = node;
-      }
-    });
-    return bestNode || document.body || null;
+    if (contentRoot) return contentRoot;
+    return document.querySelector('.page-block.root-block, [data-content-editable-root="true"].page-block') || null;
   }
 
   function getReactFiberNode(el) {
@@ -75,17 +124,20 @@
 
   function findEditorApiValue(extractor) {
     var candidates = [];
+    var contentRoot = getContentRootElement();
     function push(node) {
-      if (node && node.nodeType === 1 && candidates.indexOf(node) === -1) candidates.push(node);
+      if (!node || node.nodeType !== 1 || candidates.indexOf(node) !== -1) return;
+      if (contentRoot && node !== contentRoot && !contentRoot.contains(node)) return;
+      candidates.push(node);
     }
-    push(getContentRootElement());
+    push(contentRoot);
     push(document.activeElement);
     var selection = null;
     try { selection = window.getSelection ? window.getSelection() : null; } catch (e) {}
     if (selection && selection.anchorNode) {
       push(selection.anchorNode.nodeType === 1 ? selection.anchorNode : selection.anchorNode.parentElement);
     }
-    Array.prototype.slice.call(document.querySelectorAll(EDITABLE_SELECTOR), 0, 12).forEach(push);
+    if (contentRoot) Array.prototype.slice.call(contentRoot.querySelectorAll(EDITABLE_SELECTOR), 0, 12).forEach(push);
 
     for (var i = 0; i < candidates.length; i++) {
       var node = candidates[i];
@@ -118,13 +170,47 @@
   }
 
   function getDocToken() {
-    var match = location.pathname.match(/\/(docx|wiki|doc|sheet|slides|base)\/([A-Za-z0-9]+)/);
+    var match = location.pathname.match(/\/(docx|wiki|doc)\/([A-Za-z0-9]+)/);
     return match ? match[2] : null;
   }
 
+  function normalizeDocumentTitleText(text) {
+    return String(text || '')
+      .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '')
+      .replace(/\s+/g, ' ')
+      .replace(/\s*(最近修改:.*|已经保存到云端.*|分享\s*编辑.*|分享.*)$/i, '')
+      .trim();
+  }
+
+  function isPlaceholderDocumentTitle(text) {
+    var value = normalizeDocumentTitleText(text);
+    return !value || /^(飞书云文档|Lark|未命名文档|Untitled)$/i.test(value);
+  }
+
+  function getDocumentTitleFromDom() {
+    var selectors = [
+      '.note-title__input.disabled',
+      '.header-ssr-layout-component-Title',
+      '.wiki-suite-title .breadcrumb-editable-title',
+      '.breadcrumb-editable-title',
+      'h1.page-block-content:not(.page-block-title-empty)',
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      var nodes = document.querySelectorAll(selectors[i]);
+      for (var j = 0; j < nodes.length; j++) {
+        var title = normalizeDocumentTitleText(nodes[j].innerText || nodes[j].textContent || '');
+        if (!isPlaceholderDocumentTitle(title)) return title;
+      }
+    }
+    return '';
+  }
+
   function getDocumentTitle() {
+    var domTitle = getDocumentTitleFromDom();
+    if (domTitle) return domTitle;
     var title = document.querySelector('title');
-    return title ? title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '') : '副本';
+    var text = title ? normalizeDocumentTitleText(title.textContent.replace(/ - 飞书云文档$/, '').replace(/ - Lark$/, '')) : '';
+    return isPlaceholderDocumentTitle(text) ? '副本' : text;
   }
 
   function getEditorReadyState() {
@@ -193,12 +279,6 @@
 
   // ── Toast ──────────────────────────────────────────────────────────────────
 
-  function getTopAccessibleDocument() {
-    try { if (window.top && window.top.document) return window.top.document; }
-    catch (err) {}
-    return document;
-  }
-
   var __toastCapture = null;
 
   function beginToastCapture() {
@@ -235,164 +315,4 @@
       __toastCapture.message = text;
     }
     console.info('[Feishu Helper]', text);
-  }
-
-  // ── Pending paste storage (IndexedDB + GM_* shared) ────────────────────────
-
-  function clonePendingPasteData(data) {
-    if (!data || typeof data !== 'object') return null;
-    try { return JSON.parse(JSON.stringify(data)); }
-    catch (e) { return null; }
-  }
-
-  function isPendingPasteFresh(data) {
-    return !!(data && data.ts && Date.now() - data.ts < 3600000);
-  }
-
-  function canUseSharedPendingPasteStorage() {
-    return typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
-  }
-
-  function getSharedPendingPaste() {
-    if (!canUseSharedPendingPasteStorage()) return null;
-    try { return clonePendingPasteData(GM_getValue(SHARED_PENDING_PASTE_KEY, null)); }
-    catch (e) { return null; }
-  }
-
-  function setSharedPendingPaste(data) {
-    if (!canUseSharedPendingPasteStorage()) return;
-    try { GM_setValue(SHARED_PENDING_PASTE_KEY, clonePendingPasteData(data)); }
-    catch (e) {}
-  }
-
-  function deleteSharedPendingPaste() {
-    if (typeof GM_deleteValue !== 'function') return;
-    try { GM_deleteValue(SHARED_PENDING_PASTE_KEY); }
-    catch (e) {}
-  }
-
-  function requestExtensionPendingPaste(op, value) {
-    return new Promise(function (resolve) {
-      var requestId = 'pending-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-      var timer = setTimeout(function () {
-        document.removeEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
-        resolve(null);
-      }, 2000);
-      function onResult(event) {
-        var detail = (event && event.detail) || {};
-        if (detail.requestId !== requestId) return;
-        clearTimeout(timer);
-        document.removeEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
-        resolve(detail && detail.ok ? detail.value || null : null);
-      }
-      document.addEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
-      try {
-        document.dispatchEvent(new CustomEvent(EXTENSION_PENDING_PASTE_EVENT, {
-          detail: { requestId: requestId, op: op, value: value || null },
-        }));
-      } catch (error) {
-        clearTimeout(timer);
-        document.removeEventListener(EXTENSION_PENDING_PASTE_RESULT_EVENT, onResult, true);
-        resolve(null);
-      }
-    });
-  }
-
-  function getExtensionPendingPaste() {
-    return requestExtensionPendingPaste('get').then(clonePendingPasteData);
-  }
-
-  function setExtensionPendingPaste(data) {
-    return requestExtensionPendingPaste('set', clonePendingPasteData(data));
-  }
-
-  function deleteExtensionPendingPaste() {
-    return requestExtensionPendingPaste('delete');
-  }
-
-  function openDB() {
-    return new Promise(function (resolve, reject) {
-      var req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = function () { req.result.createObjectStore(DB_STORE); };
-      req.onsuccess = function () { resolve(req.result); };
-      req.onerror = function () { reject(req.error); };
-    });
-  }
-
-  function getLocalPendingPaste() {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve) {
-        var tx = db.transaction(DB_STORE, 'readonly');
-        var req = tx.objectStore(DB_STORE).get(DB_KEY);
-        req.onsuccess = function () {
-          var data = req.result;
-          if (isPendingPasteFresh(data)) {
-            resolve(data);
-          } else {
-            if (data) {
-              var dtx = db.transaction(DB_STORE, 'readwrite');
-              dtx.objectStore(DB_STORE).delete(DB_KEY);
-            }
-            resolve(null);
-          }
-        };
-        req.onerror = function () { resolve(null); };
-      });
-    }).catch(function () { return null; });
-  }
-
-  function setLocalPendingPaste(data) {
-    return openDB().then(function (db) {
-      return new Promise(function (resolve, reject) {
-        var tx = db.transaction(DB_STORE, 'readwrite');
-        tx.objectStore(DB_STORE).put(data, DB_KEY);
-        tx.oncomplete = function () { resolve(); };
-        tx.onerror = function () { reject(tx.error); };
-      });
-    });
-  }
-
-  // The page IndexedDB, legacy GM cache and extension cache may all contain
-  // stale entries; pick the freshest one, then mirror it back so both sides agree.
-  function getPendingPaste() {
-    return getLocalPendingPaste().then(function (localData) {
-      return getExtensionPendingPaste().then(function (extensionData) {
-        var sharedData = getSharedPendingPaste();
-        if (!isPendingPasteFresh(sharedData)) {
-          if (sharedData) deleteSharedPendingPaste();
-          sharedData = null;
-        }
-        if (!isPendingPasteFresh(extensionData)) {
-          if (extensionData) deleteExtensionPendingPaste();
-          extensionData = null;
-        }
-        var chosen = localData;
-        if (sharedData && (!chosen || Number(sharedData.ts || 0) > Number(chosen.ts || 0))) {
-          chosen = sharedData;
-        }
-        if (extensionData && (!chosen || Number(extensionData.ts || 0) > Number(chosen.ts || 0))) {
-          chosen = extensionData;
-        }
-        if (!chosen) return ensureUploadedTokenMapMatchesPending(null);
-        setSharedPendingPaste(chosen);
-        return Promise.all([
-          chosen === localData ? Promise.resolve() : setLocalPendingPaste(chosen).catch(function () {}),
-          chosen === extensionData ? Promise.resolve() : setExtensionPendingPaste(chosen).catch(function () {}),
-        ]).then(function () {
-          return ensureUploadedTokenMapMatchesPending(chosen);
-        });
-      });
-    }).catch(function () { return null; });
-  }
-
-  function setPendingPaste(data) {
-    data.ts = Date.now();
-    data.savedFromHost = location.host;
-    data.savedFromHref = location.href;
-    setDocAttr('data-feishu-pending-paste-ts', String(data.ts));
-    setSharedPendingPaste(data);
-    return Promise.all([
-      setLocalPendingPaste(data).catch(function () {}),
-      setExtensionPendingPaste(data).catch(function () {}),
-    ]).then(function () {});
   }

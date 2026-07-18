@@ -9,9 +9,11 @@ export default defineConfig({
     jsxDev: false,
   },
   build: {
-    outDir: resolve('dist/feishu-extension/ui'),
+    outDir: process.env.FEISHU_EXTENSION_UI_OUT_DIR
+      ? resolve(process.env.FEISHU_EXTENSION_UI_OUT_DIR)
+      : resolve('dist/feishu-extension/ui'),
     emptyOutDir: false,
-    minify: false,
+    target: 'chrome111',
     rollupOptions: {
       input: resolve('extension/ui/popup.html'),
       output: {

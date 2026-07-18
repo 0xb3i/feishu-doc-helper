@@ -29,34 +29,34 @@
 
     var done = 0;
     var total = imgUrls.length;
+    var nextIndex = 0;
+    var concurrency = Math.min(5, imgUrls.length);
     showToast('📷 转换图片中 0/' + total);
     emitUiProgress({ phase: 'convert', done: 0, total: total, label: '转换图片' });
 
-    var tasks = imgUrls.map(function (item) {
-      return function () {
-        return fetchImageAsBase64(item.url).then(function (base64) {
-          done++;
-          showToast('📷 转换图片中 ' + done + '/' + total);
-          emitUiProgress({ phase: 'convert', done: done, total: total, label: '转换图片' });
-          if (base64) {
-            html = html.replace(item.full, 'src="' + IMAGE_PLACEHOLDER_SRC + '"');
-            if (item.token) tokenToBase64[item.token] = base64;
-          }
-        });
-      };
-    });
-
-    var batchSize = 5;
-    var chain = Promise.resolve();
-    for (var i = 0; i < tasks.length; i += batchSize) {
-      (function (batch) {
-        chain = chain.then(function () {
-          return Promise.all(batch.map(function (fn) { return fn(); }));
-        });
-      })(tasks.slice(i, i + batchSize));
+    function convertOne(item) {
+      return fetchImageAsBase64(item.url).then(function (base64) {
+        done++;
+        showToast('📷 转换图片中 ' + done + '/' + total);
+        emitUiProgress({ phase: 'convert', done: done, total: total, label: '转换图片' });
+        if (base64) {
+          html = html.replace(item.full, 'src="' + IMAGE_PLACEHOLDER_SRC + '"');
+          if (item.token) tokenToBase64[item.token] = base64;
+        }
+      });
     }
 
-    return chain.then(function () { return { html: html, tokenToBase64: tokenToBase64 }; });
+    function worker() {
+      if (nextIndex >= imgUrls.length) return Promise.resolve();
+      var item = imgUrls[nextIndex];
+      nextIndex += 1;
+      return convertOne(item).then(worker);
+    }
+
+    var workers = [];
+    for (var i = 0; i < concurrency; i++) workers.push(worker());
+
+    return Promise.all(workers).then(function () { return { html: html, tokenToBase64: tokenToBase64 }; });
   }
 
   // ── Image upload via Feishu internal API ───────────────────────────────────
@@ -146,12 +146,13 @@
       var uploadedCount = 0;
       var failedCount = 0;
       var processedCount = 0;
-      var chain = Promise.resolve();
+      var nextIndex = 0;
+      var concurrency = Math.min(4, images.length);
 
       emitUiProgress({ phase: 'upload', done: 0, total: images.length, label: '上传图片' });
 
-      images.forEach(function (img) {
-        chain = chain.then(function () {
+      function uploadOne(img) {
+        return Promise.resolve().then(function () {
           if (!img.base64) return { token: '', error: 'no base64 data' };
           return uploadBase64ImageViaApi(img.base64, objToken);
         }).then(function (result) {
@@ -165,9 +166,20 @@
           processedCount += 1;
           emitUiProgress({ phase: 'upload', done: processedCount, total: images.length, label: '上传图片' });
         });
-      });
 
-      return chain.then(function () {
+      }
+
+      function worker() {
+        if (nextIndex >= images.length) return Promise.resolve();
+        var img = images[nextIndex];
+        nextIndex += 1;
+        return uploadOne(img).then(worker);
+      }
+
+      var workers = [];
+      for (var i = 0; i < concurrency; i++) workers.push(worker());
+
+      return Promise.all(workers).then(function () {
         return {
           tokenMap: tokenMap,
           attemptedCount: images.length,
@@ -176,32 +188,6 @@
         };
       });
     });
-  }
-
-  // Token map for uploaded images (oldToken -> newToken).  Cleared when a
-  // newer pendingPaste record is observed so we don't reuse stale uploads.
-  var uploadedTokenMap = {};
-  var uploadedTokenMapPendingTs = 0;
-
-  function clearUploadedTokenMap() {
-    uploadedTokenMap = {};
-    uploadedTokenMapPendingTs = 0;
-  }
-
-  function ensureUploadedTokenMapMatchesPending(pendingPaste) {
-    if (!pendingPaste || !uploadedTokenMapPendingTs) return pendingPaste;
-    if (pendingPaste.ts && pendingPaste.ts > uploadedTokenMapPendingTs) {
-      clearUploadedTokenMap();
-    }
-    return pendingPaste;
-  }
-
-  function mergeUploadedTokenMap(tokenMap) {
-    if (tokenMap && typeof tokenMap === 'object') {
-      Object.keys(tokenMap).forEach(function (key) { uploadedTokenMap[key] = tokenMap[key]; });
-    }
-    uploadedTokenMapPendingTs = Date.now();
-    return Object.keys(uploadedTokenMap).length;
   }
 
   // ── Image injection observer (for paste flows that leave img placeholders) ─

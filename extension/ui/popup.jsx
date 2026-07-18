@@ -1,17 +1,18 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import '../shared/protocol.js';
 import './popup.css';
 
-const FEISHU_EXTENSION_UI = 'FEISHU_EXTENSION_UI';
-const FEISHU_EXTENSION_PROGRESS = 'FEISHU_EXTENSION_PROGRESS';
-const FEISHU_EXTENSION_PROGRESS_QUERY = 'FEISHU_EXTENSION_PROGRESS_QUERY';
+const protocol = globalThis.FeishuExtensionProtocol;
+const FEISHU_EXTENSION_UI = protocol.MESSAGES.UI;
+const FEISHU_EXTENSION_PROGRESS = protocol.MESSAGES.PROGRESS;
+const FEISHU_EXTENSION_PROGRESS_QUERY = protocol.MESSAGES.PROGRESS_QUERY;
 
 const ACTIONS = [
   {
     key: 'extract',
     title: '提取文档',
     description: '读取源文档结构，写入扩展共享缓存',
-    primary: true,
     icon: (
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" aria-hidden="true">
         <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
@@ -24,7 +25,6 @@ const ACTIONS = [
     key: 'paste',
     title: '粘贴副本',
     description: '把最近一次提取的内容写入目标文档',
-    primary: false,
     icon: (
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" aria-hidden="true">
         <rect x="8" y="2.5" width="8" height="4" rx="1.2" stroke="currentColor" strokeWidth="1.6" />
@@ -37,7 +37,6 @@ const ACTIONS = [
     key: 'images',
     title: '图片',
     description: '列出当前页面可提取图片',
-    primary: false,
     icon: (
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" aria-hidden="true">
         <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="currentColor" strokeWidth="1.6" />
@@ -50,7 +49,6 @@ const ACTIONS = [
     key: 'snapshot',
     title: '快照',
     description: '重新读取页面结构，确认当前内容',
-    primary: false,
     icon: (
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" aria-hidden="true">
         <path d="M4 8.5a2 2 0 0 1 2-2h1.6l1-1.6a1 1 0 0 1 .85-.48h5.1a1 1 0 0 1 .85.48l1 1.6H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
@@ -73,7 +71,7 @@ const ALERT_ICONS = {
 };
 
 function isFeishuUrl(url) {
-  return /^https:\/\/[^/]+\.(feishu\.cn|larksuite\.com|larkoffice\.com)\//i.test(String(url || ''));
+  return protocol.isSupportedDocumentUrl(url);
 }
 
 function getActiveTab() {
@@ -301,6 +299,7 @@ function Panel() {
       }
       const total = Number(message.total || 0);
       const done = Number(message.done || 0);
+      if (message.state === 'start' || total <= 0) return;
       const percent = total > 0 ? (done / total) * 100 : 0;
       setProgress({
         phase: String(message.phase || ''),
@@ -329,6 +328,7 @@ function Panel() {
         const done = Number(record.done || 0);
         setRunningAction(record.action);
         setStatus({ type: 'info', text: '正在执行：' + getActionTitle(record.action) });
+        if (total <= 0) return;
         setProgress({
           phase: String(record.phase || ''),
           label: String(record.label || '处理中'),
@@ -353,14 +353,6 @@ function Panel() {
     <main className="popup">
       <header className="popup__header">
         <div className="brand">
-          <span className="brand__mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
-              <path d="M5 4.5A2.5 2.5 0 0 1 7.5 2h6.6a2 2 0 0 1 1.42.59l3.9 3.9A2 2 0 0 1 20 7.9V19.5A2.5 2.5 0 0 1 17.5 22h-10A2.5 2.5 0 0 1 5 19.5z" fill="currentColor" opacity="0.14" />
-              <path d="M5 4.5A2.5 2.5 0 0 1 7.5 2h6.6a2 2 0 0 1 1.42.59l3.9 3.9A2 2 0 0 1 20 7.9V19.5A2.5 2.5 0 0 1 17.5 22h-10A2.5 2.5 0 0 1 5 19.5z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-              <path d="M14 2.5V6a2 2 0 0 0 2 2h3.5" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-              <path d="m12.4 11-1.2 3h2.6l-1.8 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </span>
           <h1>飞书文档助手</h1>
           <StatusTag variant={connectionVariant}>{connectionText}</StatusTag>
         </div>

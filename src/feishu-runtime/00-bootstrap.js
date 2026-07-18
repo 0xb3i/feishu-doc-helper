@@ -25,7 +25,7 @@
 
   // ── Constants ──────────────────────────────────────────────────────────────
 
-  var SCRIPT_VERSION = '5.0.0';
+  var SCRIPT_VERSION = '__FEISHU_HELPER_VERSION__';
   var AUTOMATION_REQUEST_EVENT = 'feishu-helper:automation-request';
   var AUTOMATION_RESULT_EVENT = 'feishu-helper:automation-result';
   var CONTENT_ROOT_SELECTOR = '[data-content-editable-root="true"]';
@@ -41,10 +41,6 @@
   var FEISHU_WHITEBOARD_CLONE_RE = /\/space\/api\/whiteboard\/block\/clone(?:[/?#]|$)/i;
   var FEISHU_CAPTURED_REQUEST_LIMIT = 10;
   var IMAGE_PLACEHOLDER_SRC = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-  var DB_NAME = '__feishu_helper_db__';
-  var DB_STORE = 'paste';
-  var DB_KEY = 'pending';
-  var SHARED_PENDING_PASTE_KEY = '__feishu_helper_pending_paste__';
   var EXTENSION_PENDING_PASTE_EVENT = 'feishu-helper:pending-paste';
   var EXTENSION_PENDING_PASTE_RESULT_EVENT = 'feishu-helper:pending-paste-result';
 
@@ -108,22 +104,23 @@
 
   var capturedWhiteboardClones = [];
   var originalFetch = window.fetch;
+  var whiteboardFetchWrapper = null;
 
   function isWhiteboardCloneRequest(url, method) {
     return FEISHU_WHITEBOARD_CLONE_RE.test(String(url || '')) && /post/i.test(String(method || ''));
   }
 
   function captureRequestHeaders(headers) {
-    var out = {};
+    var out = [];
     if (!headers) return out;
     try {
       if (headers instanceof Headers) {
-        headers.forEach(function (value, key) { out[key] = value; });
+        headers.forEach(function (_value, key) { out.push(String(key).toLowerCase()); });
       } else if (typeof headers === 'object') {
-        Object.keys(headers).forEach(function (key) { out[key] = headers[key]; });
+        Object.keys(headers).forEach(function (key) { out.push(String(key).toLowerCase()); });
       }
     } catch (error) {}
-    return out;
+    return Array.from(new Set(out)).sort();
   }
 
   function summarizeWhiteboardCapture(capture, patch) {
@@ -140,35 +137,45 @@
     return initial;
   }
 
-  window.fetch = function (input, init) {
-    var url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input || ''));
-    var method = (init && init.method) || (input instanceof Request ? input.method : 'GET');
-    var capture = null;
-    if (isWhiteboardCloneRequest(url, method)) {
-      capture = recordWhiteboardClone({
-        url: url,
-        method: method,
-        timestamp: Date.now(),
-        headers: captureRequestHeaders(init && init.headers),
-        diagnosticType: 'whiteboardClone',
+  function installWhiteboardFetchCapture() {
+    if (whiteboardFetchWrapper) return false;
+    whiteboardFetchWrapper = function (input, init) {
+      var url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input || ''));
+      var method = (init && init.method) || (input instanceof Request ? input.method : 'GET');
+      var capture = null;
+      if (isWhiteboardCloneRequest(url, method)) {
+        capture = recordWhiteboardClone({
+          url: url,
+          method: method,
+          timestamp: Date.now(),
+          headerNames: captureRequestHeaders(init && init.headers),
+          diagnosticType: 'whiteboardClone',
+        });
+      }
+      var result = originalFetch.apply(this, arguments);
+      if (!capture || !result || typeof result.then !== 'function') return result;
+      return result.then(function (response) {
+        summarizeWhiteboardCapture(capture, {
+          ok: !!(response && response.ok),
+          status: Number((response && response.status) || 0),
+          statusText: String((response && response.statusText) || ''),
+          responseCapturedAt: Date.now(),
+        });
+        return response;
+      }).catch(function (error) {
+        summarizeWhiteboardCapture(capture, {
+          fetchError: stringifyError(error),
+          responseCapturedAt: Date.now(),
+        });
+        throw error;
       });
-    }
-    var result = originalFetch.apply(this, arguments);
-    if (!capture || !result || typeof result.then !== 'function') return result;
-    return result.then(function (response) {
-      summarizeWhiteboardCapture(capture, {
-        ok: !!(response && response.ok),
-        status: Number((response && response.status) || 0),
-        statusText: String((response && response.statusText) || ''),
-        responseCapturedAt: Date.now(),
-      });
-      return response;
-    }).catch(function (error) {
-      summarizeWhiteboardCapture(capture, {
-        fetchError: stringifyError(error),
-        responseCapturedAt: Date.now(),
-      });
-      throw error;
-    });
-  };
-  registerDisposer(function () { window.fetch = originalFetch; });
+    };
+    window.fetch = whiteboardFetchWrapper;
+    return true;
+  }
+
+  registerEventListener(document, 'feishu-install-whiteboard-network-debug', installWhiteboardFetchCapture, true);
+  registerDisposer(function () {
+    if (whiteboardFetchWrapper && window.fetch === whiteboardFetchWrapper) window.fetch = originalFetch;
+    whiteboardFetchWrapper = null;
+  });
