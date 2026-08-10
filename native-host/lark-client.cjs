@@ -149,6 +149,24 @@ class LarkClient {
     });
   }
 
+  canCopyDocument(documentUrl) {
+    let url;
+    try { url = new URL(String(documentUrl || '')); }
+    catch (error) { return Promise.reject(new Error('源文档 URL 无效')); }
+    const match = url.pathname.match(/^\/(docx|docs?|wiki)\/([A-Za-z0-9_-]{1,256})(?:\/|$)/i);
+    if (!match) return Promise.reject(new Error('源文档 URL 无效'));
+    const resourceType = match[1].toLowerCase() === 'docx'
+      ? 'docx'
+      : match[1].toLowerCase() === 'wiki' ? 'wiki' : 'doc';
+    return this.run([
+      'drive', 'permission.members', 'auth', '--as', 'user',
+      '--type', resourceType, '--token', match[2], '--action', 'copy',
+    ]).then(function (envelope) {
+      return envelope && envelope.identity === 'user'
+        && envelope.data && envelope.data.auth_result === true;
+    });
+  }
+
   exportWhiteboard(boardToken) {
     return this.run([
       'whiteboard', '+export', '--as', 'user', '--whiteboard-token', boardToken, '--output-type', 'raw',

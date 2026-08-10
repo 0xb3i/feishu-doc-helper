@@ -69,6 +69,13 @@ function validateRequest(config, request) {
     }
     return;
   }
+  if (request.op === 'copyPermission') {
+    if (request.action !== 'extract' || !hasSourceUrl || !transfer.isSupportedDocumentUrl(request.sourceUrl)
+      || hasBundleId || hasTargetUrl) {
+      throw new Error('Native copy permission 请求无效');
+    }
+    return;
+  }
   if (request.op === 'export') {
     if (request.action !== 'extract' || !hasSourceUrl || !transfer.isSupportedDocumentUrl(request.sourceUrl)
       || hasBundleId || hasTargetUrl) {
@@ -141,6 +148,9 @@ function createHandler(config) {
   return async function handle(request) {
     validateRequest(config, request);
     if (request.op === 'inspect') return serviceFor(request.sourceUrl).inspectSource(request.sourceUrl);
+    if (request.op === 'copyPermission') {
+      return serviceFor(request.sourceUrl).inspectCopyPermission(request.sourceUrl);
+    }
     if (request.op === 'export') return serviceFor(request.sourceUrl).exportSource(request.sourceUrl);
     if (request.op === 'preflight') return serviceFor(request.targetUrl).preflight(request.bundleId, request.targetUrl);
     if (request.op === 'apply') return serviceFor(request.targetUrl).apply(request.bundleId, request.targetUrl);

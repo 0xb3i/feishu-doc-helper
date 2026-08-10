@@ -26,6 +26,7 @@ before(() => {
   artifacts.manifest = JSON.parse(fs.readFileSync(path.join(DIST, 'manifest.json'), 'utf8'));
   artifacts.mainWorld = fs.readFileSync(path.join(DIST, 'content/main-world.js'), 'utf8');
   artifacts.bridge = fs.readFileSync(path.join(DIST, 'content/bridge.js'), 'utf8');
+  artifacts.protocol = fs.readFileSync(path.join(DIST, 'shared/protocol.js'), 'utf8');
   artifacts.imageClipboard = fs.readFileSync(path.join(DIST, 'shared/image-clipboard.js'), 'utf8');
   artifacts.serviceWorker = fs.readFileSync(path.join(DIST, 'background/service-worker.js'), 'utf8');
   artifacts.popupHtml = fs.readFileSync(path.join(DIST, 'ui/popup.html'), 'utf8');
@@ -127,6 +128,11 @@ test('whiteboard transfer uses scoped Native Messaging with immutable source han
   assert.match(artifacts.mainWorld, /requestDocumentInspect\(\)/);
   assert.match(artifacts.mainWorld, /requestWhiteboardPreflight\(transfer\)/);
   assert.match(artifacts.mainWorld, /requestWhiteboardApply\(transfer\)/);
+  assert.match(artifacts.protocol, /COPY_PERMISSION:\s*'copyPermission'/);
+  assert.match(
+    artifacts.bridge,
+    /OPS\.INSPECT[\s\S]*?OPS\.COPY_PERMISSION[\s\S]*?OPS\.EXPORT\) request\.sourceUrl = location\.href/
+  );
   assert.match(
     artifacts.mainWorld,
     /hasBrowserWhiteboardPayload\(transfer\)\s+\? requestBrowserWhiteboardPreflight\(transfer\)/
@@ -135,6 +141,22 @@ test('whiteboard transfer uses scoped Native Messaging with immutable source han
   assert.match(artifacts.mainWorld, /canonical pending 永远保持源租户数据不变/);
   assert.ok(artifacts.popupSource.includes('画板'));
   assert.match(artifacts.serviceWorker, /完全退出并重新打开 Chrome \/ Chrome Canary/);
+});
+
+test('copy-permitted documents use a fail-closed native hybrid fast path', () => {
+  assert.match(artifacts.mainWorld, /requestNativeCopyPermission\(\)/);
+  assert.match(artifacts.mainWorld, /prepareNativeHybridPayload\(content, activeTransfer\)/);
+  assert.match(artifacts.mainWorld, /validateNativeClipboardCompleteness/);
+  assert.match(artifacts.mainWorld, /transformNativeClipboardForWhiteboards/);
+  assert.match(artifacts.mainWorld, /pasteMode === 'nativeHybrid'/);
+  assert.match(artifacts.mainWorld, /waitForNativeHybridPasteVerified/);
+  assert.match(artifacts.mainWorld, /rollbackDocumentRootChildren/);
+  assert.match(artifacts.bridge, /activeAction !== protocol\.ACTIONS\.EXTRACT/);
+  assert.match(artifacts.bridge, /document\.execCommand\('copy'\)/);
+  assert.doesNotMatch(
+    artifacts.bridge.match(/var NATIVE_COPY_EVENT[\s\S]*?var WHITEBOARD_NATIVE_EVENT/)[0],
+    /preventDefault|stopImmediatePropagation|setData/
+  );
 });
 
 test('image metrics use the same docx record source as paste payloads', () => {

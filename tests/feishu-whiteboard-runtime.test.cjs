@@ -561,6 +561,7 @@ test('document extraction always asks the official API even when browser structu
     getDocToken: function () { return 'doc_token'; },
     showToast: function () {},
     emitUiProgress: function () {},
+    requestNativeCopyPermission: function () { return Promise.resolve(false); },
     getStructService: function () { throw new Error('browser count must not gate official export'); },
     requestWhiteboardExport: function () {
       exportCalls += 1;

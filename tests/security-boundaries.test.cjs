@@ -66,6 +66,9 @@ test('extension protocol only accepts document pages and scoped pending operatio
   assert.equal(protocol.validatePendingPayload({ schemaVersion: 1, ts: Date.now(), text: 'ok' }).ok, true);
   assert.equal(protocol.validatePendingPayload({ schemaVersion: 1, ts: Date.now(), unexpected: true }).ok, false);
   assert.equal(protocol.validatePendingPayload(makePendingV2()).ok, true);
+  assert.equal(protocol.validatePendingPayload(makePendingV2({ pasteMode: 'nativeHybrid' })).ok, true);
+  assert.equal(protocol.validatePendingPayload(makePendingV2({ pasteMode: 'structuredFallback' })).ok, true);
+  assert.equal(protocol.validatePendingPayload(makePendingV2({ pasteMode: 'unsafe' })).ok, false);
   assert.equal(protocol.validatePendingPayload({
     schemaVersion: 1,
     ts: Date.now(),
@@ -250,6 +253,11 @@ test('native messaging requests are operation-scoped and fail closed', () => {
     action: 'extract',
     sourceUrl: DOCUMENT_URL,
   })), { ok: true, op: 'export' });
+  assert.deepEqual(protocol.validateNativeMessagingRequest(makeNativeRequest({
+    op: 'copyPermission',
+    action: 'extract',
+    sourceUrl: DOCUMENT_URL,
+  })), { ok: true, op: 'copyPermission' });
   assert.equal(protocol.validateNativeMessagingRequest(makeNativeRequest({
     op: 'preflight',
     action: 'paste',
@@ -278,6 +286,9 @@ test('native messaging requests are operation-scoped and fail closed', () => {
     { host: 'evil.native.host', op: 'export', action: 'extract', sourceUrl: DOCUMENT_URL },
     { op: 'export', action: 'paste', sourceUrl: DOCUMENT_URL },
     { op: 'inspect', action: 'extract', sourceUrl: DOCUMENT_URL },
+    { op: 'copyPermission', action: 'scan', sourceUrl: DOCUMENT_URL },
+    { op: 'copyPermission', action: 'extract', sourceUrl: DOCUMENT_URL, bundleId: BUNDLE_ID },
+    { op: 'copyPermission', action: 'extract', sourceUrl: 'https://evil.example/docx/Abc123' },
     { op: 'inspect', action: 'scan', sourceUrl: DOCUMENT_URL, bundleId: BUNDLE_ID },
     { op: 'export', action: 'extract', sourceUrl: 'https://evil.example/docx/Abc123' },
     { op: 'export', action: 'extract', sourceUrl: new URL(DOCUMENT_URL) },
