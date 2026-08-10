@@ -138,6 +138,7 @@
         }
         if (!pending.clipboardHtml && pending.html) showToast('⏳ 准备粘贴内容中...', 0);
         var savedSelection = saveCurrentSelection();
+        var emptyBodyRecordsBeforePaste = captureEmptyBodyRecordsBeforePaste();
         emitUiProgress({ phase: 'body-target', done: 0, total: 0, label: '准备正文' });
         return applyDocumentTitleToCurrentDoc(pending.title).then(function (titleApplied) {
           return waitForDocumentBodyPasteTarget(6000).then(function (focused) {
@@ -150,6 +151,7 @@
           }).then(function (result) {
             return waitForPasteBodySettled(pending, 12000).then(function (settled) {
               if (!settled) throw new Error('粘贴后的完整文档结构加载超时');
+              removePreservedEmptyBodyRecords(emptyBodyRecordsBeforePaste);
               return replaceImageMarkersWithNativePaste(result.targetImageDescriptors, transfer);
             }).then(function (imageSummary) {
               result.imageReconciliation = imageSummary;

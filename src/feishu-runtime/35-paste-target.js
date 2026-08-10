@@ -189,6 +189,53 @@
     });
   }
 
+  function captureEmptyBodyRecordsBeforePaste() {
+    var editorAPI = getEditorAPI();
+    var rootBlock = editorAPI && editorAPI.structService && editorAPI.structService.rootBlock;
+    var rootRecord = rootBlock && rootBlock.record;
+    var children = rootBlock && Array.isArray(rootBlock.children) ? rootBlock.children : [];
+    if (!rootRecord || !rootRecord.id || !children.length) return null;
+    var emptyIds = [];
+    for (var i = 0; i < children.length; i++) {
+      var record = children[i] && children[i].record;
+      var snapshot = record && record.snapshot;
+      if (!record || !record.id || !snapshot || snapshot.type !== 'text'
+        || attribs.normalizePlainText(attribs.decodeBlockText(snapshot)).trim()) return null;
+      emptyIds.push(String(record.id));
+    }
+    return { rootRecordId: String(rootRecord.id), recordIds: emptyIds };
+  }
+
+  function removePreservedEmptyBodyRecords(captured) {
+    var editorAPI = getEditorAPI();
+    if (!captured || !editorAPI || !editorAPI.dataService
+      || typeof editorAPI.dataService.getRecordMap !== 'function'
+      || typeof editorAPI.dataService.applyTransaction !== 'function') return false;
+    var recordMap = editorAPI.dataService.getRecordMap();
+    var rootRecord = recordMap && recordMap.get(captured.rootRecordId);
+    var children = rootRecord && rootRecord.snapshot && rootRecord.snapshot.children;
+    if (!Array.isArray(children) || !children.length) return false;
+    var capturedIds = {};
+    captured.recordIds.forEach(function (recordId) { capturedIds[recordId] = true; });
+    var removed = false;
+    var nextChildren = children.filter(function (recordId) {
+      if (!capturedIds[recordId]) return true;
+      var record = recordMap.get(recordId);
+      var snapshot = record && record.snapshot;
+      var stillEmpty = snapshot && snapshot.type === 'text'
+        && !attribs.normalizePlainText(attribs.decodeBlockText(snapshot)).trim();
+      if (stillEmpty) removed = true;
+      return !stillEmpty;
+    });
+    // 只有粘贴确实生成了其他正文时才移除旧占位块，避免把空文档变成
+    // 无法继续编辑的中间状态，也不删除源内容中有意保留的空段落。
+    if (!removed || !nextChildren.length) return false;
+    editorAPI.dataService.applyTransaction('feishu-helper-remove-empty-paste-anchor', function (tx) {
+      tx.replaceChildren(captured.rootRecordId, nextChildren);
+    });
+    return true;
+  }
+
   function extractInsertionHtml(html) {
     if (!html) return '';
     var fragmentMatch = html.match(/<!--StartFragment-->([\s\S]*?)<!--EndFragment-->/i);

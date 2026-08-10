@@ -12,7 +12,6 @@
     var selectors = [
       '.page-block-header__custom_icon .gpf-biz-suite-custom-icon__icon-emoji',
       '.page-block-header__custom_icon [class*="custom-icon__icon-emoji"]',
-      '.wiki-suite-title .gpf-biz-suite-custom-icon__icon-emoji',
     ];
     for (var i = 0; i < selectors.length; i++) {
       var nodes = Array.prototype.slice.call(document.querySelectorAll(selectors[i]), 0, 10);
