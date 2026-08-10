@@ -319,7 +319,7 @@ test('target placeholder cleanup starts while the pasted body is still settling'
   assert.match(artifacts.mainWorld, /removePreservedEmptyBodyRecords\(emptyBodyRecordsBeforePaste\)/);
   const targetReadyIndex = artifacts.mainWorld.indexOf('return waitForDocumentBodyPasteTarget(6000)');
   const captureIndex = artifacts.mainWorld.indexOf(
-    'emptyBodyRecordsBeforePaste = captureEmptyBodyRecordsBeforePaste()',
+    'return waitForEmptyBodyRecordsCapture(1200, wasEmptyBodyBeforeFocus)',
     targetReadyIndex
   );
   const commitIndex = artifacts.mainWorld.indexOf('return commitPaste(', captureIndex);

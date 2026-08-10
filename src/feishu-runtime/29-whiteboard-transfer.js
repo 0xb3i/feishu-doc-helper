@@ -488,7 +488,7 @@
     }).join('');
   }
 
-  function buildBrowserWhiteboardTransfer() {
+  function collectBrowserWhiteboardSourceBlocks() {
     var editorAPI = getEditorAPI();
     var rootBlock = editorAPI && editorAPI.structService && editorAPI.structService.rootBlock;
     if (!rootBlock) throw new Error('当前页面未加载完整的源画板结构');
@@ -510,8 +510,17 @@
       (block.children || []).forEach(function (child) { visit(child, depth + 1); });
     }
     visit(rootBlock, 0);
-    if (!boards.length) return null;
     if (boards.length > 100) throw new Error('当前页面画板数量超过迁移上限');
+    return boards;
+  }
+
+  function countBrowserWhiteboardRecords() {
+    return collectBrowserWhiteboardSourceBlocks().length;
+  }
+
+  function buildBrowserWhiteboardTransfer() {
+    var boards = collectBrowserWhiteboardSourceBlocks();
+    if (!boards.length) return null;
     var bundleId = createBrowserWhiteboardBundleId();
     var transfer = {
       schemaVersion: 1,
@@ -535,11 +544,21 @@
       if (!ready) throw nativeError;
       return waitForStableBrowserDocumentSummary(5000);
     }).then(function (sourceSummary) {
-      if (!sourceSummary || isEmptyDocumentSummary(sourceSummary)) throw nativeError;
+      if (!sourceSummary
+        || (isEmptyDocumentSummary(sourceSummary)
+          && !isConfirmedEmptyBrowserDocumentSummary(sourceSummary))) {
+        throw nativeError;
+      }
       var transfer = buildBrowserWhiteboardTransfer();
       var browserBoardCount = transfer ? transfer.boardCount : 0;
-      if (browserBoardCount !== sourceSummary.whiteboardCount) {
+      if (browserBoardCount < sourceSummary.whiteboardCount) {
         throw new Error('当前页面未加载完整的源画板结构');
+      }
+      // renderer 的摘要会跳过部分不参与正文渲染的容器，但迁移扫描直接读取
+      // Struct Service 中经过身份校验的 whiteboard record。后者发现更多画板时
+      // 应保留全部画板；反方向（记录更少）仍按局部树失败关闭。
+      if (browserBoardCount > sourceSummary.whiteboardCount) {
+        sourceSummary = Object.assign({}, sourceSummary, { whiteboardCount: browserBoardCount });
       }
       if (!transfer) return { whiteboardTransfer: null, sourceSummary: sourceSummary };
       return captureBrowserWhiteboards(transfer).then(function (browserTransfer) {
@@ -602,6 +621,20 @@
       && summary.whiteboardCount === 0;
   }
 
+  function isConfirmedEmptyBrowserDocumentSummary(summary) {
+    if (!isDocumentSnapshotReady()
+      || !isEmptyDocumentSummary(summary)
+      || typeof captureValidationSnapshot !== 'function') {
+      return false;
+    }
+    var snapshot = captureValidationSnapshot();
+    if (!snapshot || !String(snapshot.title || '').trim()) return false;
+    // 知识库目录页可能只有 Struct Service 子节点入口，没有正文 editor DOM，
+    // 因此不能要求 isVisibleDocumentBodyEmpty() 必须为 true。稳定采样负责排除
+    // hydration 早期的瞬时 0；这里再确认结构中没有尚待捕获的画板。
+    return buildBrowserWhiteboardTransfer() === null;
+  }
+
   function isNativeDocumentAccessDenied(error) {
     var message = String(error && error.message || error || '');
     return /no permission|permission denied|forbidden|lacks?\s+(?:view|edit)\s+access|无权|没有权限|权限不足/i.test(message);
@@ -624,9 +657,14 @@
     if (!snapshot) return null;
     var componentCounts = snapshot.semanticSnapshot && snapshot.semanticSnapshot.componentCounts || {};
     var structuredWhiteboards = Number(snapshot.whiteboardCount || 0);
-    var renderedWhiteboards = structuredWhiteboards > 0
-      ? structuredWhiteboards
-      : Number(componentCounts.whiteboard || 0);
+    var browserWhiteboardCount = 0;
+    try { browserWhiteboardCount = countBrowserWhiteboardRecords(); }
+    catch (error) {}
+    var renderedWhiteboards = Math.max(
+      structuredWhiteboards,
+      browserWhiteboardCount,
+      structuredWhiteboards > 0 ? 0 : Number(componentCounts.whiteboard || 0)
+    );
     // 图片只能来自结构化正文记录；DOM 语义扫描会把头像、图标和模板缩略图混入统计。
     var renderedImages = Number(snapshot.imageCount || 0);
     var structuredEquations = Number(snapshot.equationCount || 0);
@@ -672,14 +710,15 @@
     var lastSummary = null;
     return new Promise(function (resolve) {
       function check() {
-        if (isDocumentSnapshotReady()
-          && !(typeof isVisibleDocumentBodyEmpty === 'function' && isVisibleDocumentBodyEmpty())) {
+        if (isDocumentSnapshotReady()) {
           var summary = buildBrowserDocumentSummary();
-          var signature = summary ? JSON.stringify(summary) : '';
+          var publishable = summary && (!isEmptyDocumentSummary(summary)
+            || isConfirmedEmptyBrowserDocumentSummary(summary));
+          var signature = publishable ? JSON.stringify(summary) : '';
           if (signature && signature === lastSignature) stableReads += 1;
           else stableReads = signature ? 1 : 0;
           lastSignature = signature;
-          lastSummary = summary || lastSummary;
+          lastSummary = publishable ? summary : lastSummary;
           if (stableReads >= 3 && Date.now() - startedAt >= 600) {
             resolve(lastSummary);
             return;
@@ -702,7 +741,15 @@
       return requestWhiteboardNative('inspect', { sourceUrl: location.href }, 90000);
     }).then(function (data) {
       var officialSummary = validateOfficialDocumentSummary(data);
-      if (!isEmptyDocumentSummary(officialSummary)) return officialSummary;
+      if (!isEmptyDocumentSummary(officialSummary)) {
+        var browserSummary = buildBrowserDocumentSummary();
+        if (browserSummary && browserSummary.whiteboardCount > officialSummary.whiteboardCount) {
+          officialSummary = Object.assign({}, officialSummary, {
+            whiteboardCount: browserSummary.whiteboardCount,
+          });
+        }
+        return officialSummary;
+      }
 
       // 个人租户无法由 Native Host 使用企业 profile 读取文档 XML，接口会返回假空文档。
       // 只有页面已明确渲染出非空正文时才启用稳定浏览器快照；真正空文档仍保留官方 0。
@@ -718,12 +765,14 @@
       // 页面已拥有完整 Struct Service 时，Native Host 的企业身份仍可能无权读取
       // 用户当前可见的跨租户/只读文档。只对明确的权限错误回退，避免把 Host
       // 不可用、协议异常等真实故障静默降级成可能不完整的浏览器统计。
-      if (!isNativeDocumentAccessDenied(error)
-        || (typeof isVisibleDocumentBodyEmpty === 'function' && isVisibleDocumentBodyEmpty())) {
+      if (!isNativeDocumentAccessDenied(error)) {
         throw error;
       }
       return waitForStableBrowserDocumentSummary(5000).then(function (browserSummary) {
-        if (browserSummary && !isEmptyDocumentSummary(browserSummary)) return browserSummary;
+        if (browserSummary && (!isEmptyDocumentSummary(browserSummary)
+          || isConfirmedEmptyBrowserDocumentSummary(browserSummary))) {
+          return browserSummary;
+        }
         throw error;
       });
     });

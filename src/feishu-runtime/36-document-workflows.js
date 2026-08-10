@@ -141,6 +141,9 @@
         if (!pending.clipboardHtml && pending.html) showToast('⏳ 准备粘贴内容中...', 0);
         var savedSelection = saveCurrentSelection();
         var emptyBodyRecordsBeforePaste = null;
+        var preFocusSnapshot = captureValidationSnapshot();
+        var wasEmptyBodyBeforeFocus = !!preFocusSnapshot
+          && Number(preFocusSnapshot.blockCount || 0) === 0;
         emitUiProgress({ phase: 'body-target', done: 0, total: 0, label: '准备正文' });
         return applyDocumentTitleToCurrentDoc(pending.title).then(function (titleApplied) {
           return waitForDocumentBodyPasteTarget(6000).then(function (focused) {
@@ -151,10 +154,18 @@
             // 真正的空页初始没有任何正文 record；点击飞书首行占位符以取得
             // 粘贴焦点时，飞书才会创建空 text record。必须在激活后捕获，否则会
             // 把这个粘贴锚点永久留在标题与首个正文块之间。
-            emptyBodyRecordsBeforePaste = captureEmptyBodyRecordsBeforePaste();
-            emitUiProgress({ phase: 'body-paste', done: 0, total: 0, label: '写入正文' });
-            return commitPaste(titleApplied ? stripTitleFromContent(pending, pending.title) : pending, {});
+            // 聚焦首行后，飞书会异步把 DOM 占位符写入 Struct Service。
+            // 等待这个 record 可见后再粘贴，才能在正文落地后精确删除原锚点。
+            return waitForEmptyBodyRecordsCapture(1200, wasEmptyBodyBeforeFocus).then(function (captured) {
+              emptyBodyRecordsBeforePaste = captured;
+              emitUiProgress({ phase: 'body-paste', done: 0, total: 0, label: '写入正文' });
+              return commitPaste(titleApplied ? stripTitleFromContent(pending, pending.title) : pending, {});
+            });
           }).then(function (result) {
+            // 飞书可能在 paste Promise 与“正文稳定”信号都结束后才提交复用
+            // 首行的尾部事务。用短生命周期后台观察器兜住这个晚到锚点，
+            // 避免为了等待不可靠信号阻塞整个粘贴流程。
+            schedulePreservedEmptyBodyRecordsCleanup(emptyBodyRecordsBeforePaste, 6000);
             // 新正文一进入结构树就删除目标页原有的空占位块，避免用户在
             // 后续图片/画板处理期间持续看到标题下方的假空行。完整结构校验仍并行执行。
             var earlyEmptyCleanup = waitForPreservedEmptyBodyRecordsRemoval(
@@ -166,7 +177,6 @@
               earlyEmptyCleanup,
             ]).then(function (settledAndCleaned) {
               if (!settledAndCleaned[0]) throw new Error('粘贴后的完整文档结构加载超时');
-              // 极慢页面可能超过早期窗口，在结构稳定后再做一次幂等兜底。
               removePreservedEmptyBodyRecords(emptyBodyRecordsBeforePaste);
               return replaceImageMarkersWithNativePaste(result.targetImageDescriptors, transfer);
             }).then(function (imageSummary) {

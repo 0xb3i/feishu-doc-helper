@@ -273,6 +273,35 @@ test('document inspect uses DOM media counts only when structured counts are abs
   });
 });
 
+test('document inspect counts validated deep whiteboard records beyond renderer depth', async () => {
+  const context = loadWhiteboardRuntime();
+  const api = context.__whiteboardTestApi;
+  context.requestWhiteboardNative = function () {
+    return Promise.resolve({ blockCount: 184, equationCount: 32, imageCount: 16, whiteboardCount: 2 });
+  };
+  context.getEditorReadyState = function () {
+    return {
+      readyState: 'complete', hasContentRoot: true, hasStructService: true,
+      hasRootBlock: true, hasContentLoaded: true,
+    };
+  };
+  context.captureValidationSnapshot = function () {
+    return {
+      title: 'Agent Memory', blockCount: 184, equationCount: 32,
+      imageCount: 16, whiteboardCount: 2,
+      semanticSnapshot: { componentCounts: { whiteboard: 3 } },
+    };
+  };
+  context.countBrowserWhiteboardRecords = function () { return 3; };
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await api.requestDocumentInspect())), {
+    blockCount: 184,
+    equationCount: 32,
+    imageCount: 16,
+    whiteboardCount: 3,
+  });
+});
+
 test('document inspect falls back to the rendered structure when native identity lacks access', async () => {
   const context = loadWhiteboardRuntime();
   const api = context.__whiteboardTestApi;
@@ -538,6 +567,88 @@ test('document extraction falls back to browser whiteboards when native identity
     imageCount: 0,
     whiteboardCount: 1,
   });
+});
+
+test('document extraction preserves a confirmed empty document when native identity lacks access', async () => {
+  const context = loadWhiteboardRuntime();
+  const api = context.__whiteboardTestApi;
+  context.requestWhiteboardNative = function () {
+    return Promise.reject(new Error(
+      'No permission to operate on this document: the current user lacks view or edit access.'
+    ));
+  };
+  context.getEditorReadyState = function () {
+    return {
+      readyState: 'complete',
+      hasContentRoot: true,
+      hasStructService: true,
+      hasRootBlock: true,
+      hasContentLoaded: true,
+    };
+  };
+  // Wiki directory pages can have Struct Service child entries without a body editor.
+  context.isVisibleDocumentBodyEmpty = function () { return false; };
+  context.captureValidationSnapshot = function () {
+    return {
+      title: '1. 大语言模型基础',
+      blockCount: 0,
+      equationCount: 0,
+      imageCount: 0,
+      whiteboardCount: 0,
+      semanticSnapshot: { componentCounts: {} },
+    };
+  };
+  context.buildBrowserWhiteboardTransfer = function () { return null; };
+  context.setTimeout = function (callback) { callback(); return 0; };
+  let now = 0;
+  context.Date = { now: function () { now += 240; return now; } };
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await api.requestWhiteboardExport())), {
+    whiteboardTransfer: null,
+    sourceSummary: {
+      blockCount: 0,
+      equationCount: 0,
+      imageCount: 0,
+      whiteboardCount: 0,
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(await api.requestDocumentInspect())), {
+    blockCount: 0,
+    equationCount: 0,
+    imageCount: 0,
+    whiteboardCount: 0,
+  });
+});
+
+test('access-denied export preserves validated browser boards omitted by the rendered summary', async () => {
+  const context = loadWhiteboardRuntime();
+  const api = context.__whiteboardTestApi;
+  const transfer = makeTransfer(2);
+  context.requestWhiteboardNative = function () {
+    return Promise.reject(new Error('No permission to operate on this document'));
+  };
+  context.getEditorReadyState = function () {
+    return {
+      readyState: 'complete', hasContentRoot: true, hasStructService: true,
+      hasRootBlock: true, hasContentLoaded: true,
+    };
+  };
+  context.captureValidationSnapshot = function () {
+    return {
+      title: 'Agent Memory', blockCount: 184, equationCount: 32,
+      imageCount: 16, whiteboardCount: 1,
+      semanticSnapshot: { componentCounts: { whiteboard: 2 } },
+    };
+  };
+  context.buildBrowserWhiteboardTransfer = function () { return transfer; };
+  context.captureBrowserWhiteboards = function (value) { return Promise.resolve(value); };
+  context.setTimeout = function (callback) { callback(); return 0; };
+  let now = 0;
+  context.Date = { now: function () { now += 240; return now; } };
+
+  const result = JSON.parse(JSON.stringify(await api.requestWhiteboardExport()));
+  assert.equal(result.whiteboardTransfer.boardCount, 2);
+  assert.equal(result.sourceSummary.whiteboardCount, 2);
 });
 
 test('document extraction does not hide unrelated native export failures', async () => {

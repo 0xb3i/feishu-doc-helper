@@ -35,6 +35,7 @@ function loadImageRuntime(overrides) {
     + 'indexRegisteredImageMarkers: indexRegisteredImageMarkers,'
     + 'waitForExpectedImageMarkers: waitForExpectedImageMarkers,'
     + 'waitForRegisteredImageRecords: waitForRegisteredImageRecords'
+    + ',selectImageMarkerBlock: selectImageMarkerBlock'
     + '};', context, { filename: '20-images.js' });
   return { api: context.__imageTestApi, progress, fetchedUrls };
 }
@@ -93,6 +94,65 @@ test('native image paste waits for every structured marker before it starts', as
   assert.equal(await runtime.api.waitForExpectedImageMarkers([
     { marker: 'marker-a' }, { marker: 'marker-b' },
   ], 100, 0), true);
+});
+
+test('structured image marker selection renders its exact block and supports split text nodes', async () => {
+  const left = { nodeValue: '[[FEISHU_HELPER_' };
+  const right = { nodeValue: 'IMAGE:run:0001]]' };
+  const host = {
+    textContent: left.nodeValue + right.nodeValue,
+    querySelectorAll() { return []; },
+    focus() {},
+  };
+  const range = {
+    startNode: null,
+    startOffset: 0,
+    endNode: null,
+    endOffset: 0,
+    setStart(node, offset) { this.startNode = node; this.startOffset = offset; },
+    setEnd(node, offset) { this.endNode = node; this.endOffset = offset; },
+  };
+  const selection = {
+    selected: null,
+    removeAllRanges() { this.selected = null; },
+    addRange(value) { this.selected = value; },
+    toString() {
+      if (!this.selected) return '';
+      return this.selected.startNode.nodeValue.slice(this.selected.startOffset)
+        + this.selected.endNode.nodeValue.slice(0, this.selected.endOffset);
+    },
+  };
+  let renderedId = '';
+  const runtime = loadImageRuntime({
+    NodeFilter: { SHOW_TEXT: 4 },
+    document: {
+      createTreeWalker() {
+        const nodes = [left, right];
+        let index = 0;
+        return { nextNode() { return nodes[index++] || null; } };
+      },
+      createRange() { return range; },
+    },
+    window: { getSelection() { return selection; } },
+  });
+  const editorAPI = {
+    viewService: {
+      layoutManager: {
+        scrollToSelection() { return Promise.resolve(); },
+        renderNodeByIdSync(id) { renderedId = id; },
+      },
+      elements: new Map([['slot-view', { hostElementRef: { current: host } }]]),
+    },
+  };
+
+  await runtime.api.selectImageMarkerBlock(
+    editorAPI,
+    { id: 'slot-view' },
+    '[[FEISHU_HELPER_IMAGE:run:0001]]'
+  );
+
+  assert.equal(renderedId, 'slot-view');
+  assert.equal(selection.toString(), '[[FEISHU_HELPER_IMAGE:run:0001]]');
 });
 
 function imageBlock(id, token) {
@@ -222,12 +282,26 @@ test('clipboard HTML image resources become matching text slots before target pa
   assert.doesNotMatch(marked, /data-lark-record-data|data-meta-block-props|source-token-[ab]/);
 });
 
-test('clipboard HTML markerization fails closed when a resource has no source-token match', () => {
+test('clipboard HTML markerization falls back to document order for aliased image tokens', () => {
   const runtime = loadImageRuntime();
-  assert.throws(function () {
-    runtime.api.markerizeImagesInClipboardHtml(
-      '<figure data-block-type="image" data-lark-record-data="unknown"><img></figure>',
-      [{ sourceToken: 'source-token-a', marker: 'marker-a' }]
-    );
-  }, /HTML 图片槽位无法唯一匹配源图片/);
+  const marked = runtime.api.markerizeImagesInClipboardHtml(
+    '<figure data-block-type="image" data-lark-record-data="unknown"><img></figure>',
+    [{ sourceToken: 'source-token-a', marker: 'marker-a' }]
+  );
+
+  assert.equal(marked, '<p>marker-a</p>');
+});
+
+test('clipboard HTML markerization keeps repeated source images in document order', () => {
+  const runtime = loadImageRuntime();
+  const marked = runtime.api.markerizeImagesInClipboardHtml(
+    '<figure data-block-type="image" data-lark-record-data="same-token"><img></figure>'
+      + '<figure data-block-type="image" data-lark-record-data="alias-token"><img></figure>',
+    [
+      { sourceToken: 'same-token', marker: 'marker-a' },
+      { sourceToken: 'same-token', marker: 'marker-b' },
+    ]
+  );
+
+  assert.equal(marked, '<p>marker-a</p><p>marker-b</p>');
 });

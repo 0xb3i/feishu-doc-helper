@@ -189,21 +189,70 @@
     });
   }
 
-  function captureEmptyBodyRecordsBeforePaste() {
+  function captureEmptyBodyRecordsBeforePaste(knownEmptyBody) {
     var editorAPI = getEditorAPI();
     var rootBlock = editorAPI && editorAPI.structService && editorAPI.structService.rootBlock;
     var rootRecord = rootBlock && rootBlock.record;
     var children = rootBlock && Array.isArray(rootBlock.children) ? rootBlock.children : [];
-    if (!rootRecord || !rootRecord.id || !children.length) return null;
+    if (!rootRecord || !rootRecord.id) return null;
+    // 空文档的结构树可能混有不属于正文的内部辅助 record。不能因为这些
+    // record 不是文本段落就放弃捕获；以用户可见的结构化正文快照为准，
+    // 只有确认为 0 块时才允许清理其中的空文本型粘贴锚点。
+    var bodySnapshot = knownEmptyBody ? null : captureValidationSnapshot();
+    if (!knownEmptyBody && (!bodySnapshot || Number(bodySnapshot.blockCount || 0) !== 0)) return null;
     var emptyIds = [];
     for (var i = 0; i < children.length; i++) {
       var record = children[i] && children[i].record;
       var snapshot = record && record.snapshot;
-      if (!record || !record.id || !snapshot || snapshot.type !== 'text'
-        || attribs.normalizePlainText(attribs.decodeBlockText(snapshot)).trim()) return null;
-      emptyIds.push(String(record.id));
+      if (record && record.id && isEmptyPreservedPasteAnchorSnapshot(snapshot)) {
+        emptyIds.push(String(record.id));
+      }
     }
-    return { rootRecordId: String(rootRecord.id), recordIds: emptyIds };
+    return {
+      rootRecordId: String(rootRecord.id),
+      recordIds: emptyIds,
+      removeAllEmptyTextAnchors: true,
+    };
+  }
+
+  function waitForEmptyBodyRecordsCapture(timeoutMs, knownEmptyBody) {
+    var bodySnapshot = knownEmptyBody ? null : captureValidationSnapshot();
+    if (!knownEmptyBody && (!bodySnapshot || Number(bodySnapshot.blockCount || 0) !== 0)) {
+      return Promise.resolve(null);
+    }
+    var startedAt = Date.now();
+    var emptyBodyCapture = null;
+    return new Promise(function (resolve) {
+      function check() {
+        var captured = captureEmptyBodyRecordsBeforePaste(knownEmptyBody);
+        if (captured) emptyBodyCapture = captured;
+        if (captured && captured.recordIds.length) { resolve(captured); return; }
+        if (Date.now() - startedAt >= Number(timeoutMs || 0)) {
+          resolve(emptyBodyCapture);
+          return;
+        }
+        setTimeout(check, 50);
+      }
+      check();
+    });
+  }
+
+  function isEmptyPreservedPasteAnchorSnapshot(snapshot) {
+    if (!snapshot) return false;
+    // 飞书原生粘贴会复用空文档的首行 text record，并继承相邻源块的
+    // paragraph type。于是占位符可能在粘贴后变成空 bullet / heading，
+    // 但 record id 仍是粘贴前捕获的那个。这里只识别文本型 paragraph，
+    // 同时要求没有子块，避免误删图片、画板或承载嵌套列表的容器。
+    var type = String(snapshot.type || '');
+    var isTextParagraph = type === 'text'
+      || type === 'bullet'
+      || type === 'ordered'
+      || type === 'todo'
+      || /^heading[1-9]$/.test(type);
+    var children = Array.isArray(snapshot.children) ? snapshot.children : [];
+    return isTextParagraph
+      && children.length === 0
+      && !attribs.normalizePlainText(attribs.decodeBlockText(snapshot)).trim();
   }
 
   function removePreservedEmptyBodyRecords(captured) {
@@ -219,11 +268,11 @@
     captured.recordIds.forEach(function (recordId) { capturedIds[recordId] = true; });
     var removed = false;
     var nextChildren = children.filter(function (recordId) {
-      if (!capturedIds[recordId]) return true;
       var record = recordMap.get(recordId);
       var snapshot = record && record.snapshot;
-      var stillEmpty = snapshot && snapshot.type === 'text'
-        && !attribs.normalizePlainText(attribs.decodeBlockText(snapshot)).trim();
+      var canRemove = capturedIds[recordId] || captured.removeAllEmptyTextAnchors === true;
+      if (!canRemove) return true;
+      var stillEmpty = isEmptyPreservedPasteAnchorSnapshot(snapshot);
       if (stillEmpty) removed = true;
       return !stillEmpty;
     });
@@ -247,6 +296,18 @@
       }
       check();
     });
+  }
+
+  function schedulePreservedEmptyBodyRecordsCleanup(captured, timeoutMs) {
+    if (!captured) return false;
+    var startedAt = Date.now();
+    function check() {
+      removePreservedEmptyBodyRecords(captured);
+      if (Date.now() - startedAt >= Number(timeoutMs || 0)) return;
+      setTimeout(check, 100);
+    }
+    setTimeout(check, 0);
+    return true;
   }
 
   function extractInsertionHtml(html) {

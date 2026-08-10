@@ -332,25 +332,25 @@
     var source = String(html || '');
     var expected = Array.isArray(descriptors) ? descriptors : [];
     if (!expected.length) return source;
-    var descriptorsBySourceToken = {};
+    var remainingDescriptors = expected.slice();
     expected.forEach(function (descriptor) {
       var token = String((descriptor && descriptor.sourceToken) || '');
       if (!token) throw new Error('HTML 图片槽位缺少源 token');
-      if (!descriptorsBySourceToken[token]) descriptorsBySourceToken[token] = [];
-      descriptorsBySourceToken[token].push(descriptor);
     });
     var imageBlockCount = 0;
     var marked = source.replace(
       /<figure\b(?=[^>]*\bdata-block-type=(['"])image\1)[^>]*>[\s\S]*?<\/figure>/gi,
       function (imageBlockHtml) {
         imageBlockCount += 1;
-        var matchingTokens = Object.keys(descriptorsBySourceToken).filter(function (token) {
-          return imageBlockHtml.indexOf(token) !== -1 && descriptorsBySourceToken[token].length > 0;
+        var matchingDescriptors = remainingDescriptors.filter(function (descriptor) {
+          return imageBlockHtml.indexOf(String(descriptor.sourceToken || '')) !== -1;
         });
-        if (matchingTokens.length !== 1) {
-          throw new Error('HTML 图片槽位无法唯一匹配源图片');
-        }
-        var descriptor = descriptorsBySourceToken[matchingTokens[0]].shift();
+        // 飞书对重复图片可能给某个 HTML figure 写入别名 token，甚至完全省略
+        // token；结构化 record 与 clipboard HTML 仍保持文档顺序。优先用
+        // token 精确匹配，无法匹配时消费下一个剩余槽位，避免因别名中断整页。
+        var descriptor = matchingDescriptors[0] || remainingDescriptors[0];
+        if (!descriptor) throw new Error('HTML 图片槽位数量超过上传结果');
+        remainingDescriptors.splice(remainingDescriptors.indexOf(descriptor), 1);
         return '<p>' + descriptor.marker + '</p>';
       }
     );
@@ -399,14 +399,19 @@
             for (var i = 0; i < nodes.length; i++) {
               if (String(nodes[i].textContent || '').trim() === marker) { markerNode = nodes[i]; break; }
             }
-            if (markerNode) {
-              var zone = markerNode.closest('[contenteditable]') || host;
+            var markerRange = markerNode
+              ? (function () {
+                  var exactRange = document.createRange();
+                  exactRange.selectNodeContents(markerNode);
+                  return exactRange;
+                })()
+              : buildTextRangeForMarker(host, marker);
+            if (markerRange) {
+              var zone = markerNode && markerNode.closest('[contenteditable]') || host;
               try { if (zone && typeof zone.focus === 'function') zone.focus({ preventScroll: true }); } catch (error) {}
-              var range = document.createRange();
-              range.selectNodeContents(markerNode);
               var selection = window.getSelection();
               selection.removeAllRanges();
-              selection.addRange(range);
+              selection.addRange(markerRange);
               if (String(selection.toString() || '').trim() !== marker) {
                 reject(new Error('图片槽位文本未被完整选中'));
                 return;
@@ -561,6 +566,23 @@
         setTimeout(check, 140);
       }
       check();
+    });
+  }
+
+  function selectRegisteredImageMarker(marker, viewport, startTop) {
+    var editorAPI = getEditorAPI();
+    var rootBlock = editorAPI && editorAPI.structService && editorAPI.structService.rootBlock;
+    var block = rootBlock && findImageMarkerBlocks(rootBlock, [{ marker: marker }])[marker];
+    if (!editorAPI || !block) {
+      return locateAndSelectRenderedImageMarker(marker, viewport, startTop);
+    }
+    // Data Service 已确认 marker 存在时，直接让编辑器布局服务渲染对应 block。
+    // 这不依赖当前滚动窗口，能覆盖长文档和多图文档的虚拟化区域；旧的
+    // viewport 扫描只作为布局服务暂不可用时的兼容兜底。
+    return selectImageMarkerBlock(editorAPI, block, marker).then(function () {
+      return { scrollTop: viewport.scrollTop };
+    }).catch(function () {
+      return locateAndSelectRenderedImageMarker(marker, viewport, startTop);
     });
   }
 
@@ -855,7 +877,7 @@
     expected.forEach(function (descriptor, index) {
       chain = chain.then(function () {
         emitUiProgress({ phase: 'image-native-paste', done: index, total: expected.length, label: '重建图片' });
-        return locateAndSelectRenderedImageMarker(anchorMarker, viewport, nextScrollTop).then(function (location) {
+        return selectRegisteredImageMarker(anchorMarker, viewport, nextScrollTop).then(function (location) {
           nextScrollTop = location.scrollTop;
           placeCaretAfterRenderedImageMarker(anchorMarker);
           var previousImageIds = snapshotRenderedImageIds();

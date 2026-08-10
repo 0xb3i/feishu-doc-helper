@@ -225,6 +225,24 @@
   }
 
   function getCurrentBodyTextForPasteStability() {
+    var shell = document.querySelector(
+      '[data-content-editable-root="true"].page-block, '
+      + '[data-content-editable-root="true"].root-block, .page-block.root-block'
+    );
+    if (shell && typeof shell.querySelectorAll === 'function') {
+      var editors = Array.prototype.slice.call(
+        shell.querySelectorAll('.zone-container.text-editor[contenteditable="true"]'),
+        0,
+        120
+      ).filter(function (node) {
+        return typeof isVisibleElement !== 'function' || isVisibleElement(node);
+      });
+      if (editors.length) {
+        return attribs.normalizePlainText(editors.map(function (node) {
+          return node.innerText || node.textContent || '';
+        }).join('\n'));
+      }
+    }
     var root = getContentRootElement();
     return root ? attribs.normalizePlainText(root.innerText || root.textContent || '') : '';
   }
