@@ -100,11 +100,13 @@
       var transfer = pending.whiteboardTransfer && isValidWhiteboardTransfer(pending.whiteboardTransfer)
         ? pending.whiteboardTransfer
         : null;
+      // 新版 lark-cli 禁止把导出的 OpenAPI raw 节点直接写回画板。提取链路已经
+      // 捕获并校验了飞书画板自身的 PageDetail，因此优先通过当前编辑器的白板
+      // runtime 导入；仅为不含 browserBoards 的旧迁移包保留 Native Host 兼容路径。
       var preflight = transfer
-        ? (showToast('⏳ 校验画板迁移环境...', 0), requestWhiteboardPreflight(transfer).catch(function (error) {
-            if (!Array.isArray(transfer.browserBoards)) throw error;
-            return requestBrowserWhiteboardPreflight(transfer);
-          }))
+        ? (showToast('⏳ 校验画板迁移环境...', 0), hasBrowserWhiteboardPayload(transfer)
+            ? requestBrowserWhiteboardPreflight(transfer)
+            : requestWhiteboardPreflight(transfer))
         : Promise.resolve({ needsBodyPaste: true, alreadyComplete: false });
 
       return preflight.then(function (plan) {

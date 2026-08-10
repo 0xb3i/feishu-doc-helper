@@ -127,6 +127,10 @@ test('whiteboard transfer uses scoped Native Messaging with immutable source han
   assert.match(artifacts.mainWorld, /requestDocumentInspect\(\)/);
   assert.match(artifacts.mainWorld, /requestWhiteboardPreflight\(transfer\)/);
   assert.match(artifacts.mainWorld, /requestWhiteboardApply\(transfer\)/);
+  assert.match(
+    artifacts.mainWorld,
+    /hasBrowserWhiteboardPayload\(transfer\)\s+\? requestBrowserWhiteboardPreflight\(transfer\)/
+  );
   assert.match(artifacts.mainWorld, /cloneBlockTreeWithWhiteboardMarkers/);
   assert.match(artifacts.mainWorld, /canonical pending 永远保持源租户数据不变/);
   assert.ok(artifacts.popupSource.includes('画板'));
@@ -326,6 +330,10 @@ test('browser whiteboard apply relies on node verification without a fixed trail
   assert.match(artifacts.mainWorld, /function importIntoTargetWhiteboard/);
   assert.match(artifacts.mainWorld, /countState\.count === expectedState\.count/);
   assert.doesNotMatch(artifacts.mainWorld, /setTimeout\(resolve, 1800\)/);
+  assert.match(artifacts.mainWorld, /function rollbackBrowserWhiteboardTargets/);
+  assert.match(artifacts.mainWorld, /feishu-helper-whiteboard-rollback/);
+  assert.match(artifacts.mainWorld, /label: '创建画板'/);
+  assert.match(artifacts.mainWorld, /label: '导入画板'/);
 });
 
 test('browser whiteboard import binds InsertPage to the newly created target board', () => {

@@ -108,6 +108,10 @@
     return value.browserBoards === undefined || isValidBrowserWhiteboardBoards(value.browserBoards, value);
   }
 
+  function hasBrowserWhiteboardPayload(value) {
+    return isValidWhiteboardTransfer(value) && Array.isArray(value.browserBoards);
+  }
+
   function getWhiteboardRecordText(snapshot) {
     var textMap = snapshot && snapshot.text && snapshot.text.initialAttributedTexts
       && snapshot.text.initialAttributedTexts.text;
@@ -789,7 +793,7 @@
   }
 
   function requestBrowserWhiteboardPreflight(transfer) {
-    if (!isValidWhiteboardTransfer(transfer) || !Array.isArray(transfer.browserBoards)) {
+    if (!hasBrowserWhiteboardPayload(transfer)) {
       return Promise.reject(new Error('浏览器画板迁移包无效'));
     }
     var editorAPI = getEditorAPI();
@@ -866,8 +870,21 @@
         viewId: markerRecord.block.id,
         recordId: recordId,
         targetWhiteboardToken: token,
+        originalSnapshot: oldSnapshot,
         board: board,
       };
+    });
+  }
+
+  function rollbackBrowserWhiteboardTargets(editorAPI, targets) {
+    var created = Array.isArray(targets) ? targets.slice() : [];
+    if (!created.length) return Promise.resolve();
+    return Promise.resolve().then(function () {
+      editorAPI.dataService.applyTransaction('feishu-helper-whiteboard-rollback', function (tx) {
+        created.forEach(function (target) {
+          tx.replace(target.recordId, [], target.originalSnapshot);
+        });
+      });
     });
   }
 
@@ -923,7 +940,7 @@
   }
 
   function applyBrowserWhiteboards(transfer) {
-    if (!isValidWhiteboardTransfer(transfer) || !Array.isArray(transfer.browserBoards)) {
+    if (!hasBrowserWhiteboardPayload(transfer)) {
       return Promise.reject(new Error('浏览器画板迁移包无效'));
     }
     var editorAPI = getEditorAPI();
@@ -946,8 +963,18 @@
     var creation = Promise.resolve();
     transfer.slots.forEach(function (slot) {
       creation = creation.then(function () {
+        emitUiProgress({
+          phase: 'whiteboard-create', done: targets.length,
+          total: transfer.boardCount, label: '创建画板',
+        });
         return createTargetWhiteboardFromMarker(editorAPI, markers[slot.slotId], boardBySlot[slot.slotId])
-          .then(function (target) { targets.push(target); });
+          .then(function (target) {
+            targets.push(target);
+            emitUiProgress({
+              phase: 'whiteboard-create', done: targets.length,
+              total: transfer.boardCount, label: '创建画板',
+            });
+          });
       });
     });
     return creation.then(function () {
@@ -993,10 +1020,14 @@
           chain = chain.then(function () {
             emitUiProgress({
               phase: 'whiteboard-apply', done: imported.length,
-              total: targets.length, label: '重建画板',
+              total: targets.length, label: '导入画板',
             });
             return importIntoTargetWhiteboard(appBySlot[target.slotId], target).then(function (result) {
               imported.push(result);
+              emitUiProgress({
+                phase: 'whiteboard-apply', done: imported.length,
+                total: targets.length, label: '导入画板',
+              });
             });
           });
         });
@@ -1006,6 +1037,13 @@
       }).finally(function () {
         scroller.scrollTop = originalScrollTop;
         try { scroller.dispatchEvent(new Event('scroll')); } catch (error) {}
+      });
+    }).catch(function (error) {
+      return rollbackBrowserWhiteboardTargets(editorAPI, targets).then(function () {
+        throw error;
+      }, function (rollbackError) {
+        throw new Error(String(error && error.message || error)
+          + '；画板回滚失败：' + String(rollbackError && rollbackError.message || rollbackError));
       });
     });
   }

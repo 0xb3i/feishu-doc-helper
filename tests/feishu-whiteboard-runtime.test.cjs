@@ -20,6 +20,7 @@ function loadWhiteboardRuntime() {
     console,
     docxRecord,
     setTimeout,
+    TextEncoder,
     WHITEBOARD_TRANSFER_MAX_BLOCK_DEPTH: 64,
     Date,
     location: { href: 'https://example.feishu.cn/docx/source' },
@@ -39,6 +40,8 @@ function loadWhiteboardRuntime() {
     + 'cloneBlockTreeWithWhiteboardMarkers: cloneBlockTreeWithWhiteboardMarkers,'
     + 'inspectWhiteboardSlotMatches: inspectWhiteboardSlotMatches,'
     + 'isValidWhiteboardTransfer: isValidWhiteboardTransfer,'
+    + 'hasBrowserWhiteboardPayload: hasBrowserWhiteboardPayload,'
+    + 'rollbackBrowserWhiteboardTargets: rollbackBrowserWhiteboardTargets,'
     + 'requestWhiteboardExport: requestWhiteboardExport,'
     + 'requestDocumentInspect: requestDocumentInspect,'
     + 'buildBrowserDocumentSummary: buildBrowserDocumentSummary,'
@@ -59,6 +62,53 @@ function makeTransfer(count) {
   }
   return { schemaVersion: 1, bundleId: BUNDLE_ID, boardCount: count, slots };
 }
+
+function addBrowserBoards(transfer) {
+  return Object.assign({}, transfer, {
+    browserBoards: transfer.slots.map(function (slot) {
+      return {
+        slotId: slot.slotId,
+        sourceBlockId: slot.sourceBlockId,
+        sourceWhiteboardToken: 'source_board_token_' + slot.slotId,
+        pageDetail: { nodes: [], meta: {}, comments: {}, resources: [], ops: [] },
+        assets: [],
+      };
+    }),
+  });
+}
+
+test('validated PageDetail transfers use the browser whiteboard runtime', () => {
+  const api = loadWhiteboardRuntime().__whiteboardTestApi;
+  const transfer = makeTransfer(2);
+  assert.equal(api.hasBrowserWhiteboardPayload(transfer), false);
+  assert.equal(api.hasBrowserWhiteboardPayload(addBrowserBoards(transfer)), true);
+});
+
+test('browser whiteboard rollback restores every replaced marker snapshot', async () => {
+  const api = loadWhiteboardRuntime().__whiteboardTestApi;
+  const restored = [];
+  const editorAPI = {
+    dataService: {
+      applyTransaction(name, callback) {
+        assert.equal(name, 'feishu-helper-whiteboard-rollback');
+        callback({
+          replace(recordId, path, snapshot) {
+            restored.push({ recordId, path, snapshot });
+          },
+        });
+      },
+    },
+  };
+  const snapshots = [{ type: 'text', marker: 'one' }, { type: 'text', marker: 'two' }];
+  await api.rollbackBrowserWhiteboardTargets(editorAPI, [
+    { recordId: 'record-one', originalSnapshot: snapshots[0] },
+    { recordId: 'record-two', originalSnapshot: snapshots[1] },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(restored)), [
+    { recordId: 'record-one', path: [], snapshot: snapshots[0] },
+    { recordId: 'record-two', path: [], snapshot: snapshots[1] },
+  ]);
+});
 
 function block(id, snapshot, children) {
   return { record: { id, snapshot }, children: children || [] };
