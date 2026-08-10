@@ -333,6 +333,8 @@ test('browser whiteboard apply relies on node verification without a fixed trail
   assert.match(artifacts.mainWorld, /function rollbackBrowserWhiteboardTargets/);
   assert.match(artifacts.mainWorld, /feishu-helper-whiteboard-rollback/);
   assert.match(artifacts.mainWorld, /label: '创建画板'/);
+  assert.match(artifacts.mainWorld, /phase: 'whiteboard-load'/);
+  assert.match(artifacts.mainWorld, /label: '加载画板'/);
   assert.match(artifacts.mainWorld, /label: '导入画板'/);
 });
 

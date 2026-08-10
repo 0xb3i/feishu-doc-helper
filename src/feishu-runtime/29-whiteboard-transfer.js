@@ -982,8 +982,13 @@
       if (!scroller) throw new Error('无法访问目标文档滚动容器');
       var originalScrollTop = scroller.scrollTop;
       var appBySlot = {};
+      var loadedAppCount = 0;
       var maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
       var step = Math.max(320, Math.floor((scroller.clientHeight || 600) * 0.7));
+      emitUiProgress({
+        phase: 'whiteboard-load', done: 0,
+        total: transfer.boardCount, label: '加载画板',
+      });
       function captureApps() {
         targets.forEach(function (target) {
           if (appBySlot[target.slotId]) return;
@@ -998,6 +1003,14 @@
           var app = wb && wb.appProxy && wb.appProxy.app;
           if (app) appBySlot[target.slotId] = app;
         });
+        var nextLoadedCount = Object.keys(appBySlot).length;
+        if (nextLoadedCount !== loadedAppCount) {
+          loadedAppCount = nextLoadedCount;
+          emitUiProgress({
+            phase: 'whiteboard-load', done: loadedAppCount,
+            total: transfer.boardCount, label: '加载画板',
+          });
+        }
       }
       return scanVirtualScroller({
         scroller: scroller,
