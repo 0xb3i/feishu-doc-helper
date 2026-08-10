@@ -35,8 +35,6 @@
     WHITEBOARD_NATIVE_RESULT: 'feishu-helper:whiteboard-native-result',
     CLIPBOARD_TRANSFER: 'feishu-helper:clipboard-transfer',
     CLIPBOARD_TRANSFER_RESULT: 'feishu-helper:clipboard-transfer-result',
-    NATIVE_COPY: 'feishu-helper:native-copy',
-    NATIVE_COPY_RESULT: 'feishu-helper:native-copy-result',
   });
 
   var ACTIONS = Object.freeze({
@@ -59,7 +57,6 @@
     REQUEST_TYPE: 'FEISHU_HELPER_WHITEBOARD_REQUEST',
     OPS: Object.freeze({
       INSPECT: 'inspect',
-      COPY_PERMISSION: 'copyPermission',
       EXPORT: 'export',
       PREFLIGHT: 'preflight',
       APPLY: 'apply',
@@ -573,7 +570,6 @@
       html: true, text: true, clipboardHtml: true, docxRecord: true, title: true,
       pageIconEmoji: true, hasDowngradedImages: true, hasImagesToInject: true,
       hasImagesToUpload: true, orderedImageBase64List: true, semanticSnapshot: true,
-      pasteMode: true,
     };
     if (schemaVersion === 2) {
       allowedFields.pendingId = true;
@@ -592,17 +588,12 @@
     var stringFields = [
       'html', 'text', 'clipboardHtml', 'docxRecord', 'title', 'pageIconEmoji',
       'savedFromHost', 'savedFromHref',
-      'pasteMode',
     ];
     for (var i = 0; i < stringFields.length; i++) {
       var field = stringFields[i];
       if (value[field] != null && typeof value[field] !== 'string') {
         return { ok: false, error: 'pending payload field must be a string: ' + field };
       }
-    }
-    if (value.pasteMode != null
-      && value.pasteMode !== 'nativeHybrid' && value.pasteMode !== 'structuredFallback') {
-      return { ok: false, error: 'pending paste mode is invalid' };
     }
     // Legacy v1 caches could contain unresolved image entries with an empty
     // base64 field. Keep those readable until TTL expiry; newly written v2
@@ -709,13 +700,6 @@
       if (action !== ACTIONS.SCAN || !isSupportedDocumentUrl(value.sourceUrl)
         || !hasSourceUrl || hasBundleId || hasTargetUrl) {
         return { ok: false, error: 'native inspect request fields are invalid' };
-      }
-      return { ok: true, op: op };
-    }
-    if (op === NATIVE_MESSAGING.OPS.COPY_PERMISSION) {
-      if (action !== ACTIONS.EXTRACT || !isSupportedDocumentUrl(value.sourceUrl)
-        || !hasSourceUrl || hasBundleId || hasTargetUrl) {
-        return { ok: false, error: 'native copy permission request fields are invalid' };
       }
       return { ok: true, op: op };
     }

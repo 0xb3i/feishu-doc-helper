@@ -39,7 +39,6 @@ const LIB_MODULES = [
   'lib/feishu-docx-record.cjs',
   'lib/feishu-block-render.cjs',
   'lib/feishu-semantic-snapshot.cjs',
-  'lib/feishu-native-clipboard-transform.cjs',
 ];
 
 function discoverRuntimeParts() {

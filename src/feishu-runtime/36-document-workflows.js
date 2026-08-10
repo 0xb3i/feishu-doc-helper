@@ -141,7 +141,6 @@
         if (!pending.clipboardHtml && pending.html) showToast('⏳ 准备粘贴内容中...', 0);
         var savedSelection = saveCurrentSelection();
         var emptyBodyRecordsBeforePaste = null;
-        var rootChildrenBeforePaste = null;
         emitUiProgress({ phase: 'body-target', done: 0, total: 0, label: '准备正文' });
         return applyDocumentTitleToCurrentDoc(pending.title).then(function (titleApplied) {
           return waitForDocumentBodyPasteTarget(6000).then(function (focused) {
@@ -153,9 +152,6 @@
             // 粘贴焦点时，飞书才会创建空 text record。必须在激活后捕获，否则会
             // 把这个粘贴锚点永久留在标题与首个正文块之间。
             emptyBodyRecordsBeforePaste = captureEmptyBodyRecordsBeforePaste();
-            if (pending.pasteMode === 'nativeHybrid') {
-              rootChildrenBeforePaste = captureDocumentRootChildren();
-            }
             emitUiProgress({ phase: 'body-paste', done: 0, total: 0, label: '写入正文' });
             return commitPaste(titleApplied ? stripTitleFromContent(pending, pending.title) : pending, {});
           }).then(function (result) {
@@ -172,19 +168,7 @@
               if (!settledAndCleaned[0]) throw new Error('粘贴后的完整文档结构加载超时');
               // 极慢页面可能超过早期窗口，在结构稳定后再做一次幂等兜底。
               removePreservedEmptyBodyRecords(emptyBodyRecordsBeforePaste);
-              if (pending.pasteMode !== 'nativeHybrid') {
-                return replaceImageMarkersWithNativePaste(result.targetImageDescriptors, transfer);
-              }
-              emitUiProgress({ phase: 'native-verify', done: 0, total: 1, label: '校验原生正文' });
-              return waitForNativeHybridPasteVerified(result.payload, transfer, 12000)
-                .then(function (nativeSummary) {
-                  if (!nativeSummary) {
-                    rollbackDocumentRootChildren(rootChildrenBeforePaste);
-                    throw new Error('原生正文粘贴未通过完整性校验，已回滚本次新增内容');
-                  }
-                  emitUiProgress({ phase: 'native-verify', done: 1, total: 1, label: '校验原生正文' });
-                  return nativeSummary;
-                });
+              return replaceImageMarkersWithNativePaste(result.targetImageDescriptors, transfer);
             }).then(function (imageSummary) {
               result.imageReconciliation = imageSummary;
               delete result.targetImageDescriptors;
@@ -212,107 +196,6 @@
 
   // ── Extraction entry point ─────────────────────────────────────────────────
 
-  function storeExtractedPayload(content, payload, context) {
-    var state = context || {};
-    var validationSnapshot = captureValidationSnapshot();
-    var semanticSnapshot = (validationSnapshot && validationSnapshot.semanticSnapshot) || null;
-    var hasDowngradedImages = !!(payload && payload.hasDowngradedImages)
-      || /data-feishu-downgraded-images="true"/i.test(String((payload && payload.html) || ''));
-    var hasImagesToInject = !!(payload && payload.hasImagesToInject);
-    var orderedImageBase64List = (payload && payload.orderedImageBase64List) || [];
-    var withBase64 = orderedImageBase64List.filter(function (img) { return !!img.base64; }).length;
-    var pending = {
-      html: content.html,
-      text: (payload && payload.text) || content.text,
-      clipboardHtml: (payload && payload.html) || '',
-      docxRecord: (payload && payload.docxRecord) || '',
-      title: state.docTitle,
-      pageIconEmoji: state.pageIconEmoji,
-      pasteMode: state.pasteMode,
-      hasDowngradedImages: hasDowngradedImages,
-      hasImagesToInject: hasImagesToInject,
-      hasImagesToUpload: !!(payload && payload.hasImagesToUpload),
-      orderedImageBase64List: orderedImageBase64List,
-      semanticSnapshot: semanticSnapshot,
-    };
-    if (state.activeTransfer) pending.whiteboardTransfer = state.activeTransfer;
-
-    return setPendingPaste(pending).then(function () {
-      var sourceSummary = state.sourceSummary;
-      var imgCount = Number(sourceSummary && sourceSummary.imageCount);
-      var inlinedImgCount = (String((payload && payload.html) || '').match(/data:image/g) || []).length;
-      var injectCount = orderedImageBase64List.length;
-      var officialBlockCount = Number(sourceSummary && sourceSummary.blockCount);
-      var officialEquationCount = Number(sourceSummary && sourceSummary.equationCount);
-      var toastMsg = '已提取 ' + officialBlockCount + ' 块 · ' + officialEquationCount
-        + ' 公式 · ' + imgCount + ' 图片';
-      if (state.activeTransfer) toastMsg += ' · ' + state.activeTransfer.boardCount + ' 画板';
-      if (state.embeddedChartFallbacks && state.embeddedChartFallbacks.count) {
-        toastMsg += ' · ' + state.embeddedChartFallbacks.count + ' 内嵌图表已转图片';
-      }
-      if (state.pasteMode === 'nativeHybrid') toastMsg += ' · 原生快速通道';
-      if (injectCount > 0) toastMsg += ' · ' + injectCount + ' 张待注入';
-      showToast(toastMsg, 3600);
-
-      var result = {
-        title: state.docTitle,
-        pageIconEmoji: state.pageIconEmoji,
-        blockCount: officialBlockCount,
-        equationCount: officialEquationCount,
-        imageCount: imgCount,
-        whiteboardCount: state.activeTransfer ? state.activeTransfer.boardCount : 0,
-        embeddedChartCount: Number(state.embeddedChartFallbacks
-          && state.embeddedChartFallbacks.count || 0),
-        inlinedImageCount: inlinedImgCount,
-        textLen: String(content.text || '').length,
-        htmlLen: String(content.html || '').length,
-        clipboardHtmlLen: String((payload && payload.html) || '').length,
-        hasDowngradedImages: hasDowngradedImages,
-        hasImagesToInject: hasImagesToInject,
-        imageInjectCount: orderedImageBase64List.length,
-        imageInjectWithBase64: withBase64,
-        pasteMode: state.pasteMode,
-        nativeFallbackReason: state.nativeFallbackReason || '',
-        semanticSnapshot: semanticSnapshot,
-      };
-      setDocJsonAttr('data-feishu-extraction-result', Object.assign({}, result, { ts: Date.now() }));
-      return result;
-    });
-  }
-
-  function storePayloadFailureFallback(content, context) {
-    var fallbackSnapshot = captureValidationSnapshot();
-    var fallbackSemantic = (fallbackSnapshot && fallbackSnapshot.semanticSnapshot) || null;
-    return setPendingPaste({
-      html: content.html,
-      text: content.text,
-      title: context.docTitle,
-      pageIconEmoji: context.pageIconEmoji,
-      pasteMode: 'structuredFallback',
-      semanticSnapshot: fallbackSemantic,
-    }).then(function () {
-      var imgCount = Number(context.sourceSummary && context.sourceSummary.imageCount);
-      showToast('⚠️ 内容已提取，但图片预处理失败，粘贴时可能退回纯文本 · ' + imgCount + ' 图片', 3500);
-      var fallbackResult = {
-        title: context.docTitle,
-        pageIconEmoji: context.pageIconEmoji,
-        blockCount: Number(context.sourceSummary && context.sourceSummary.blockCount),
-        equationCount: Number(context.sourceSummary && context.sourceSummary.equationCount),
-        imageCount: imgCount,
-        whiteboardCount: 0,
-        inlinedImageCount: 0,
-        textLen: String(content.text || '').length,
-        htmlLen: String(content.html || '').length,
-        clipboardHtmlLen: 0,
-        pasteMode: 'structuredFallback',
-        payloadError: true,
-        semanticSnapshot: fallbackSemantic,
-      };
-      setDocJsonAttr('data-feishu-extraction-result', Object.assign({}, fallbackResult, { ts: Date.now() }));
-      return fallbackResult;
-    });
-  }
-
   function duplicateDocumentForAutomation() {
     var token = getDocToken();
     if (!token) {
@@ -326,16 +209,9 @@
     emitUiProgress({ phase: 'whiteboard-export', done: 0, total: 0, label: '检查画板' });
     var sourceSummary = null;
     var embeddedChartFallbacks = null;
-    var copyAllowed = false;
-    var nativeFallbackReason = '';
 
     // 浏览器 Struct Service 可能只装载局部树；是否存在画板以及槽位集合一律以官方 API 为准。
-    emitUiProgress({ phase: 'copy-permission', done: 0, total: 1, label: '检查原生复制权限' });
-    return requestNativeCopyPermission().then(function (allowed) {
-      copyAllowed = allowed;
-      emitUiProgress({ phase: 'copy-permission', done: 1, total: 1, label: '检查原生复制权限' });
-      return requestWhiteboardExport();
-    }).then(function (exportResult) {
+    return requestWhiteboardExport().then(function (exportResult) {
       var whiteboardTransfer = exportResult && exportResult.whiteboardTransfer;
       sourceSummary = exportResult && exportResult.sourceSummary;
       activeTransfer = whiteboardTransfer;
@@ -351,54 +227,112 @@
         ? waitForWhiteboardSourceTree(whiteboardTransfer, 6000)
         : Promise.resolve();
     }).then(function () {
-      var content = extractFullDoc(activeTransfer, null);
+      emitUiProgress({ phase: 'chart-export', done: 0, total: 0, label: '检查内嵌图表' });
+      return captureEmbeddedChartFallbacks();
+    }).then(function (chartFallbacks) {
+      embeddedChartFallbacks = chartFallbacks;
+      if (chartFallbacks && chartFallbacks.count) {
+        emitUiProgress({
+          phase: 'chart-export', done: chartFallbacks.count,
+          total: chartFallbacks.count, label: '导出内嵌图表',
+        });
+      }
+      var content = extractFullDoc(activeTransfer, embeddedChartFallbacks);
       if (!content) throw new Error('提取失败，请确保文档已加载');
       if (activeTransfer && content.whiteboardCount !== activeTransfer.boardCount) {
         throw new Error('画板占位符与源文档结构不一致，请刷新后重试');
       }
+
       var docTitle = getDocumentTitle();
       var pageIconEmoji = extractPageIconEmojiFromDom();
-      var context = {
-        activeTransfer: activeTransfer,
-        sourceSummary: sourceSummary,
-        docTitle: docTitle,
-        pageIconEmoji: pageIconEmoji,
-      };
+      return buildClipboardPayload(content).then(function (payload) {
+        var validationSnapshot = captureValidationSnapshot();
+        var semanticSnapshot = (validationSnapshot && validationSnapshot.semanticSnapshot) || null;
+        var hasDowngradedImages = !!(payload && payload.hasDowngradedImages)
+          || /data-feishu-downgraded-images="true"/i.test(String((payload && payload.html) || ''));
+        var hasImagesToInject = !!(payload && payload.hasImagesToInject);
+        var orderedImageBase64List = (payload && payload.orderedImageBase64List) || [];
+        var withBase64 = orderedImageBase64List.filter(function (img) { return !!img.base64; }).length;
+        var pending = {
+          html: content.html,
+          text: content.text,
+          clipboardHtml: (payload && payload.html) || '',
+          docxRecord: (payload && payload.docxRecord) || '',
+          title: docTitle,
+          pageIconEmoji: pageIconEmoji,
+          hasDowngradedImages: hasDowngradedImages,
+          hasImagesToInject: hasImagesToInject,
+          hasImagesToUpload: !!(payload && payload.hasImagesToUpload),
+          orderedImageBase64List: orderedImageBase64List,
+          semanticSnapshot: semanticSnapshot,
+        };
+        if (activeTransfer) pending.whiteboardTransfer = activeTransfer;
 
-      var nativeAttempt = copyAllowed
-        ? (emitUiProgress({ phase: 'native-copy', done: 0, total: 1, label: '读取原生剪贴板' }),
-          prepareNativeHybridPayload(content, activeTransfer).then(function (prepared) {
-            emitUiProgress({ phase: 'native-copy', done: 1, total: 1, label: '读取原生剪贴板' });
-            context.pasteMode = 'nativeHybrid';
-            return storeExtractedPayload(content, prepared.payload, context);
-          }).catch(function (error) {
-            nativeFallbackReason = stringifyError(error);
-            return null;
-          }))
-        : Promise.resolve(null);
-
-      return nativeAttempt.then(function (nativeResult) {
-        if (nativeResult) return nativeResult;
-        emitUiProgress({ phase: 'chart-export', done: 0, total: 0, label: '检查内嵌图表' });
-        return captureEmbeddedChartFallbacks().then(function (chartFallbacks) {
-          embeddedChartFallbacks = chartFallbacks;
-          if (chartFallbacks && chartFallbacks.count) {
-            emitUiProgress({
-              phase: 'chart-export', done: chartFallbacks.count,
-              total: chartFallbacks.count, label: '导出内嵌图表',
-            });
+        return setPendingPaste(pending).then(function () {
+          var imgCount = Number(sourceSummary && sourceSummary.imageCount);
+          var inlinedImgCount = (String((payload && payload.html) || '').match(/data:image/g) || []).length;
+          var injectCount = orderedImageBase64List.length;
+          var officialBlockCount = Number(sourceSummary && sourceSummary.blockCount);
+          var officialEquationCount = Number(sourceSummary && sourceSummary.equationCount);
+          var toastMsg = '已提取 ' + officialBlockCount + ' 块 · ' + officialEquationCount
+            + ' 公式 · ' + imgCount + ' 图片';
+          if (activeTransfer) toastMsg += ' · ' + activeTransfer.boardCount + ' 画板';
+          if (embeddedChartFallbacks && embeddedChartFallbacks.count) {
+            toastMsg += ' · ' + embeddedChartFallbacks.count + ' 内嵌图表已转图片';
           }
-          content = extractFullDoc(activeTransfer, embeddedChartFallbacks);
-          if (!content) throw new Error('提取失败，请确保文档已加载');
-          context.embeddedChartFallbacks = embeddedChartFallbacks;
-          context.pasteMode = 'structuredFallback';
-          context.nativeFallbackReason = nativeFallbackReason;
-          return buildClipboardPayload(content).then(function (payload) {
-            return storeExtractedPayload(content, payload, context);
-          }, function (error) {
-            if (activeTransfer || (embeddedChartFallbacks && embeddedChartFallbacks.count)) throw error;
-            return storePayloadFailureFallback(content, context);
-          });
+          if (injectCount > 0) toastMsg += ' · ' + injectCount + ' 张待注入';
+          showToast(toastMsg, 3600);
+
+          var result = {
+            title: docTitle,
+            pageIconEmoji: pageIconEmoji,
+            blockCount: officialBlockCount,
+            equationCount: officialEquationCount,
+            imageCount: imgCount,
+            whiteboardCount: activeTransfer ? activeTransfer.boardCount : 0,
+            embeddedChartCount: Number(embeddedChartFallbacks && embeddedChartFallbacks.count || 0),
+            inlinedImageCount: inlinedImgCount,
+            textLen: String(content.text || '').length,
+            htmlLen: String(content.html || '').length,
+            clipboardHtmlLen: String((payload && payload.html) || '').length,
+            hasDowngradedImages: hasDowngradedImages,
+            hasImagesToInject: hasImagesToInject,
+            imageInjectCount: orderedImageBase64List.length,
+            imageInjectWithBase64: withBase64,
+            semanticSnapshot: semanticSnapshot,
+          };
+          setDocJsonAttr('data-feishu-extraction-result', Object.assign({}, result, { ts: Date.now() }));
+          return result;
+        });
+      }, function (error) {
+        if (activeTransfer || (embeddedChartFallbacks && embeddedChartFallbacks.count)) throw error;
+        var fallbackSnapshot = captureValidationSnapshot();
+        var fallbackSemantic = (fallbackSnapshot && fallbackSnapshot.semanticSnapshot) || null;
+        return setPendingPaste({
+          html: content.html,
+          text: content.text,
+          title: docTitle,
+          pageIconEmoji: pageIconEmoji,
+          semanticSnapshot: fallbackSemantic,
+        }).then(function () {
+          var imgCount = Number(sourceSummary && sourceSummary.imageCount);
+          showToast('⚠️ 内容已提取，但图片预处理失败，粘贴时可能退回纯文本 · ' + imgCount + ' 图片', 3500);
+          var fallbackResult = {
+            title: docTitle,
+            pageIconEmoji: pageIconEmoji,
+            blockCount: Number(sourceSummary && sourceSummary.blockCount),
+            equationCount: Number(sourceSummary && sourceSummary.equationCount),
+            imageCount: imgCount,
+            whiteboardCount: 0,
+            inlinedImageCount: 0,
+            textLen: String(content.text || '').length,
+            htmlLen: String(content.html || '').length,
+            clipboardHtmlLen: 0,
+            payloadError: true,
+            semanticSnapshot: fallbackSemantic,
+          };
+          setDocJsonAttr('data-feishu-extraction-result', Object.assign({}, fallbackResult, { ts: Date.now() }));
+          return fallbackResult;
         });
       });
     }).catch(function (error) {

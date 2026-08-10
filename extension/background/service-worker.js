@@ -305,7 +305,6 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       action: String(nativeInput.action || ''),
     };
     if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.INSPECT
-      || nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.COPY_PERMISSION
       || nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.EXPORT) {
       nativeRequest.sourceUrl = nativeSender.url;
     }

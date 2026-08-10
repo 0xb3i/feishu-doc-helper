@@ -359,30 +359,6 @@ test('source inspection counts official document whiteboards without creating a 
   assert.deepEqual(fs.readdirSync(store.bundleRoot), []);
 });
 
-test('source copy permission preflight fails closed without disrupting extraction', async (t) => {
-  const store = new BundleStore({ dataDir: makeTempDir(t) });
-  const seen = [];
-  const service = new TransferService({
-    store: store,
-    client: {
-      async canCopyDocument(url) {
-        seen.push(url);
-        return true;
-      },
-    },
-  });
-  const sourceUrl = 'https://source.feishu.cn/docx/SourceDoc1';
-  assert.deepEqual(await service.inspectCopyPermission(sourceUrl), { copyAllowed: true });
-  assert.deepEqual(seen, [sourceUrl]);
-
-  service.client.canCopyDocument = async function () { throw new Error('identity mismatch'); };
-  assert.deepEqual(await service.inspectCopyPermission(sourceUrl), { copyAllowed: false });
-  assert.deepEqual(
-    await service.inspectCopyPermission('https://evil.example/docx/SourceDoc1'),
-    { copyAllowed: false }
-  );
-});
-
 test('target visibility polling tolerates remapped IDs and eventual consistency', async () => {
   const expected = [
     { id: 'source-shape', type: 'shape', x: 1 },
@@ -1060,22 +1036,12 @@ test('profile routing and host request validation fail closed across tenants', (
   });
   assert.doesNotThrow(function () {
     validateRequest(config, Object.assign({}, base, {
-      op: 'copyPermission', action: 'extract', sourceUrl: 'https://bytedance.sg.larkoffice.com/docx/Doc1',
-    }));
-  });
-  assert.doesNotThrow(function () {
-    validateRequest(config, Object.assign({}, base, {
       op: 'discard', action: 'extract', bundleId: BUNDLE_ID,
     }));
   });
   assert.throws(function () {
     validateRequest(config, Object.assign({}, base, {
       op: 'inspect', action: 'extract', sourceUrl: 'https://team.feishu.cn/docx/Doc1',
-    }));
-  });
-  assert.throws(function () {
-    validateRequest(config, Object.assign({}, base, {
-      op: 'copyPermission', action: 'scan', sourceUrl: 'https://team.feishu.cn/docx/Doc1',
     }));
   });
   assert.throws(function () {
@@ -1131,32 +1097,6 @@ test('LarkClient binds document writes to a revision and requires explicit succe
     revisionId: 1,
   }));
   assert.deepEqual(finalArgs.slice(-2), ['--revision-id', '1']);
-});
-
-test('LarkClient copy permission uses the URL resource type and rejects identity mismatch', async () => {
-  const client = new LarkClient({ binary: '/unused' });
-  const calls = [];
-  client.run = async function (args) {
-    calls.push(args);
-    return { ok: true, identity: 'user', data: { auth_result: true } };
-  };
-  assert.equal(await client.canCopyDocument('https://source.feishu.cn/docx/SourceDoc1'), true);
-  assert.equal(await client.canCopyDocument('https://source.feishu.cn/wiki/WikiNode1'), true);
-  assert.deepEqual(calls, [
-    ['drive', 'permission.members', 'auth', '--as', 'user',
-      '--type', 'docx', '--token', 'SourceDoc1', '--action', 'copy'],
-    ['drive', 'permission.members', 'auth', '--as', 'user',
-      '--type', 'wiki', '--token', 'WikiNode1', '--action', 'copy'],
-  ]);
-
-  client.run = async function () {
-    return { ok: true, identity: 'bot', data: { auth_result: true } };
-  };
-  assert.equal(await client.canCopyDocument('https://source.feishu.cn/doc/LegacyDoc1'), false);
-  await assert.rejects(
-    client.canCopyDocument('https://evil.example/not-a-doc/SourceDoc1'),
-    /源文档 URL 无效/
-  );
 });
 
 test('LarkClient accepts the official empty-board shape and requires an update acknowledgement', async () => {

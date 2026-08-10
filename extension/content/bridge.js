@@ -20,7 +20,6 @@
   var nativeRequestInFlight = false;
   var lastImageContextGesture = null;
   var clipboardTransferInFlight = false;
-  var nativeCopyInFlight = false;
 
   function broadcastProgress(payload) {
     try {
@@ -514,42 +513,6 @@
     }
   }, true);
 
-  // This bridge only grants the MAIN-world runtime permission to execute one
-  // real copy command. It never observes, prevents or rewrites the copy event;
-  // Feishu remains the sole producer of the native clipboard payload.
-  var NATIVE_COPY_EVENT = protocol.DOM_EVENTS.NATIVE_COPY;
-  var NATIVE_COPY_RESULT_EVENT = protocol.DOM_EVENTS.NATIVE_COPY_RESULT;
-
-  document.addEventListener(NATIVE_COPY_EVENT, function (event) {
-    var detail = (event && event.detail) || {};
-    var requestId = String(detail.requestId || '');
-    function reply(result) {
-      document.dispatchEvent(new CustomEvent(NATIVE_COPY_RESULT_EVENT, {
-        detail: Object.assign({ requestId: requestId }, result),
-      }));
-    }
-    if (!protocol.validateRequestId(requestId)) return;
-    if (!activeRequestId || activeAction !== protocol.ACTIONS.EXTRACT) {
-      reply({ ok: false, error: 'native copy is outside an active extract action' });
-      return;
-    }
-    if (nativeCopyInFlight || clipboardTransferInFlight) {
-      reply({ ok: false, error: 'another clipboard operation is still running' });
-      return;
-    }
-    nativeCopyInFlight = true;
-    try {
-      var copied = document.execCommand('copy') === true;
-      nativeCopyInFlight = false;
-      reply(copied
-        ? { ok: true, copied: true }
-        : { ok: false, error: 'extension native copy command was rejected' });
-    } catch (error) {
-      nativeCopyInFlight = false;
-      reply({ ok: false, error: String(error && error.message || error) });
-    }
-  }, true);
-
   var WHITEBOARD_NATIVE_EVENT = protocol.DOM_EVENTS.WHITEBOARD_NATIVE;
   var WHITEBOARD_NATIVE_RESULT_EVENT = protocol.DOM_EVENTS.WHITEBOARD_NATIVE_RESULT;
 
@@ -579,7 +542,6 @@
       action: activeAction,
     };
     if (op === protocol.NATIVE_MESSAGING.OPS.INSPECT
-      || op === protocol.NATIVE_MESSAGING.OPS.COPY_PERMISSION
       || op === protocol.NATIVE_MESSAGING.OPS.EXPORT) request.sourceUrl = location.href;
     if (op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT || op === protocol.NATIVE_MESSAGING.OPS.APPLY) {
       request.bundleId = String(detail.bundleId || '');

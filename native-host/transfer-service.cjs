@@ -502,16 +502,6 @@ class TransferService {
     return transfer.summarizeDocumentStructure(document.content);
   }
 
-  async inspectCopyPermission(sourceUrl) {
-    if (!transfer.isSupportedDocumentUrl(sourceUrl)) return { copyAllowed: false };
-    try {
-      if (typeof this.client.canCopyDocument !== 'function') return { copyAllowed: false };
-      return { copyAllowed: await this.client.canCopyDocument(sourceUrl) === true };
-    } catch (error) {
-      return { copyAllowed: false };
-    }
-  }
-
   async exportSource(sourceUrl) {
     if (!transfer.isSupportedDocumentUrl(sourceUrl)) throw new Error('源文档 URL 不受支持');
     this.store.cleanupExpired();
