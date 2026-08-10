@@ -163,7 +163,7 @@ test('image right-click is suppressed in the isolated bridge before Feishu handl
   assert.match(artifacts.bridge, /gestureIsFresh/);
   assert.match(artifacts.bridge, /imageElement: getImageElementAtPoint\(event\)/);
   assert.match(artifacts.bridge, /lastImageContextGesture = null/);
-  assert.match(artifacts.bridge, /writeTrustedContextImage\(imageBlob\)/);
+  assert.match(artifacts.bridge, /writeTrustedContextImage\(trustedImage\.blobPromise\)/);
   assert.doesNotMatch(artifacts.mainWorld, /suppressFeishuRightButton/);
   assert.match(artifacts.mainWorld, /openImageMenu\(e\.clientX, e\.clientY, info\)/);
   assert.match(artifacts.mainWorld, /el\.setAttribute\('tabindex', '0'\)/);
@@ -185,7 +185,11 @@ test('binary image clipboard writes use whichever extension context currently ow
   assert.doesNotMatch(artifacts.serviceWorker, /ensureOffscreenClipboardDocument/);
   assert.match(artifacts.bridge, /writeImageBlobPromise\(blobPromise\)/);
   assert.match(artifacts.imageClipboard, /new ClipboardItem\(\{ 'image\/png': pngPromise \}\)/);
-  assert.match(artifacts.mainWorld, /return writeThroughTrustedBridge\(\{ url: url \}\)/);
+  assert.match(artifacts.mainWorld, /return requestTrustedImageAction\('copy', imageInfo\)/);
+  assert.match(artifacts.mainWorld, /return requestTrustedImageAction\('download', imageInfo\)/);
+  assert.match(artifacts.bridge, /downloadTrustedContextImage\(trustedImage\.blobPromise\)/);
+  assert.match(artifacts.bridge, /anchor\.href = objectUrl/);
+  assert.doesNotMatch(artifacts.mainWorld, /a\.href = imageInfo\.src/);
   assert.doesNotMatch(artifacts.mainWorld, /return attempt\.then\(writeBlobToClipboard\)/);
 });
 

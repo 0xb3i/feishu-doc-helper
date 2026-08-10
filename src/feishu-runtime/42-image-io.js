@@ -104,35 +104,46 @@
     });
   }
 
-  function copyImageBlobToClipboard(imageInfo) {
+  function requestTrustedImageAction(action, imageInfo) {
     var url = imageInfo && imageInfo.src ? imageInfo.src : imageInfo;
+    return new Promise(function (resolve, reject) {
+      var isDownload = action === 'download';
+      var requestId = (isDownload ? 'imgdownload-' : 'imgcopy-')
+        + Date.now() + '-' + Math.random().toString(16).slice(2);
+      var requestEvent = isDownload
+        ? 'feishu-helper:image-context-download'
+        : 'feishu-helper:image-context-copy';
+      var resultEvent = isDownload
+        ? 'feishu-helper:image-context-download-result'
+        : 'feishu-helper:image-context-copy-result';
+      var timer = setTimeout(function () {
+        document.removeEventListener(resultEvent, onResult, true);
+        reject(new Error('image action bridge timeout'));
+      }, 20000);
+      function onResult(event) {
+        var detail = (event && event.detail) || {};
+        if (detail.requestId !== requestId) return;
+        clearTimeout(timer);
+        document.removeEventListener(resultEvent, onResult, true);
+        if (detail.ok && (detail.written || detail.downloaded)) resolve(detail);
+        else reject(new Error(detail.error || 'image action failed'));
+      }
+      document.addEventListener(resultEvent, onResult, true);
+      document.dispatchEvent(new CustomEvent(requestEvent, {
+        detail: {
+          requestId: requestId,
+          url: String(url || ''),
+        },
+      }));
+    });
+  }
 
-    function writeThroughTrustedBridge(payload) {
-      return new Promise(function (resolve, reject) {
-        var requestId = 'imgcopy-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-        var timer = setTimeout(function () {
-          document.removeEventListener('feishu-helper:image-context-copy-result', onResult, true);
-          reject(new Error('image clipboard bridge timeout'));
-        }, 20000);
-        function onResult(event) {
-          var detail = (event && event.detail) || {};
-          if (detail.requestId !== requestId) return;
-          clearTimeout(timer);
-          document.removeEventListener('feishu-helper:image-context-copy-result', onResult, true);
-          if (detail.ok && detail.written) resolve(detail);
-          else reject(new Error(detail.error || 'image clipboard write failed'));
-        }
-        document.addEventListener('feishu-helper:image-context-copy-result', onResult, true);
-        document.dispatchEvent(new CustomEvent('feishu-helper:image-context-copy', {
-          detail: {
-            requestId: requestId,
-            url: String(payload.url || ''),
-          },
-        }));
-      });
-    }
-
+  function copyImageBlobToClipboard(imageInfo) {
     // 同步把请求交给孤立世界，让它在当前 click 的用户激活内先提交
     // ClipboardItem Promise；像素读取与 PNG 转码可在之后异步完成。
-    return writeThroughTrustedBridge({ url: url });
+    return requestTrustedImageAction('copy', imageInfo);
+  }
+
+  function downloadImageBlobFromContext(imageInfo) {
+    return requestTrustedImageAction('download', imageInfo);
   }

@@ -27,6 +27,8 @@
     IMAGE_FETCH_RESULT: 'feishu-helper:image-fetch-result',
     IMAGE_CONTEXT_COPY: 'feishu-helper:image-context-copy',
     IMAGE_CONTEXT_COPY_RESULT: 'feishu-helper:image-context-copy-result',
+    IMAGE_CONTEXT_DOWNLOAD: 'feishu-helper:image-context-download',
+    IMAGE_CONTEXT_DOWNLOAD_RESULT: 'feishu-helper:image-context-download-result',
     PENDING_PASTE: 'feishu-helper:pending-paste',
     PENDING_PASTE_RESULT: 'feishu-helper:pending-paste-result',
     WHITEBOARD_NATIVE: 'feishu-helper:whiteboard-native',

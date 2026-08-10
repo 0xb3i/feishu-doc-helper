@@ -89,18 +89,12 @@
   }
 
   function downloadImageFromContext(imageInfo) {
-    try {
-      var a = document.createElement('a');
-      a.href = imageInfo.src;
-      a.download = 'feishu_image.png';
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    } catch (err) {
+    showImageMessage('loading', '正在导出图片…', 0);
+    downloadImageBlobFromContext(imageInfo).then(function () {
+      showImageMessage('success', '图片已下载', 2500);
+    }).catch(function () {
       showImageMessage('error', '下载图片失败', 2500);
-    }
+    });
   }
 
   function openImageMenu(x, y, imageInfo) {
@@ -185,7 +179,6 @@
       return;
     }
     e.preventDefault();
-    e.stopPropagation();
     openImageMenu(e.clientX, e.clientY, info);
   }, true);
 

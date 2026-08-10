@@ -166,9 +166,11 @@
 
   var IMAGE_CONTEXT_COPY_EVENT = protocol.DOM_EVENTS.IMAGE_CONTEXT_COPY;
   var IMAGE_CONTEXT_COPY_RESULT_EVENT = protocol.DOM_EVENTS.IMAGE_CONTEXT_COPY_RESULT;
+  var IMAGE_CONTEXT_DOWNLOAD_EVENT = protocol.DOM_EVENTS.IMAGE_CONTEXT_DOWNLOAD;
+  var IMAGE_CONTEXT_DOWNLOAD_RESULT_EVENT = protocol.DOM_EVENTS.IMAGE_CONTEXT_DOWNLOAD_RESULT;
 
-  function replyImageContextCopy(requestId, result) {
-    document.dispatchEvent(new CustomEvent(IMAGE_CONTEXT_COPY_RESULT_EVENT, {
+  function replyImageContextAction(eventName, requestId, result) {
+    document.dispatchEvent(new CustomEvent(eventName, {
       detail: Object.assign({ requestId: requestId }, result),
     }));
   }
@@ -220,20 +222,12 @@
     return clipboard.writeImageBlobPromise(blobPromise);
   }
 
-  // MAIN world 只提供已渲染像素或右击命中的受控 URL；孤立世界要求
-  // 最近的真实图片右击手势，并且一次性消耗它，防止页面脚本任意写剪贴板。
-  document.addEventListener(IMAGE_CONTEXT_COPY_EVENT, function (event) {
-    var detail = (event && event.detail) || {};
-    var requestId = String(detail.requestId || '');
-    var sourceUrl = String(detail.url || '');
-    if (!protocol.validateRequestId(requestId)) return;
-
+  function consumeTrustedContextImage(sourceUrl) {
     var gesture = lastImageContextGesture;
     var gestureIsFresh = Boolean(gesture)
       && Date.now() - gesture.createdAt <= protocol.LIMITS.IMAGE_GESTURE_TTL_MS;
     if (!gestureIsFresh) {
-      replyImageContextCopy(requestId, { ok: false, error: 'image copy requires a recent trusted context-menu gesture' });
-      return;
+      throw new Error('image action requires a recent trusted context-menu gesture');
     }
 
     var urlValidation = sourceUrl ? protocol.validateImageUrl(sourceUrl, location.href) : null;
@@ -241,8 +235,7 @@
     var hasApprovedUrl = Boolean(urlValidation && urlValidation.ok
       && gesture.candidates.indexOf(urlValidation.url) !== -1);
     if (!hasRenderedImage && !hasApprovedUrl) {
-      replyImageContextCopy(requestId, { ok: false, error: 'image copy payload does not match the trusted gesture' });
-      return;
+      throw new Error('image action payload does not match the trusted gesture');
     }
 
     lastImageContextGesture = null;
@@ -252,12 +245,85 @@
         throw error;
       })
       : fetchTrustedImageBlob(urlValidation.url);
+    return {
+      blobPromise: imageBlob,
+      mode: hasRenderedImage ? 'rendered-pixels' : 'background-fetch',
+    };
+  }
 
-    // 这一行必须在菜单 click 事件的同步调用栈中执行。imageBlob 可异步完成。
-    writeTrustedContextImage(imageBlob).then(function () {
-      replyImageContextCopy(requestId, { ok: true, written: true, mode: hasRenderedImage ? 'rendered-pixels' : 'background-fetch' });
+  function downloadTrustedContextImage(blobPromise) {
+    var clipboard = globalThis.FeishuExtensionImageClipboard;
+    if (!clipboard) return Promise.reject(new Error('image conversion context is unavailable'));
+    return Promise.resolve(blobPromise).then(clipboard.toPngBlob).then(function (pngBlob) {
+      var objectUrl = URL.createObjectURL(pngBlob);
+      var anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = 'feishu_image.png';
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(function () { URL.revokeObjectURL(objectUrl); }, 30000);
+    });
+  }
+
+  // MAIN world 只提供已渲染像素或右击命中的受控 URL；孤立世界要求
+  // 最近的真实图片右击手势，并且一次性消耗它，防止页面脚本任意导出图片。
+  document.addEventListener(IMAGE_CONTEXT_COPY_EVENT, function (event) {
+    var detail = (event && event.detail) || {};
+    var requestId = String(detail.requestId || '');
+    if (!protocol.validateRequestId(requestId)) return;
+    var trustedImage;
+    try {
+      trustedImage = consumeTrustedContextImage(String(detail.url || ''));
+    } catch (error) {
+      replyImageContextAction(IMAGE_CONTEXT_COPY_RESULT_EVENT, requestId, {
+        ok: false,
+        error: String(error && error.message || error),
+      });
+      return;
+    }
+
+    // 这一行必须在菜单 click 事件的同步调用栈中执行。blobPromise 可异步完成。
+    writeTrustedContextImage(trustedImage.blobPromise).then(function () {
+      replyImageContextAction(IMAGE_CONTEXT_COPY_RESULT_EVENT, requestId, {
+        ok: true,
+        written: true,
+        mode: trustedImage.mode,
+      });
     }).catch(function (error) {
-      replyImageContextCopy(requestId, { ok: false, error: String(error && error.message || error) });
+      replyImageContextAction(IMAGE_CONTEXT_COPY_RESULT_EVENT, requestId, {
+        ok: false,
+        error: String(error && error.message || error),
+      });
+    });
+  }, true);
+
+  document.addEventListener(IMAGE_CONTEXT_DOWNLOAD_EVENT, function (event) {
+    var detail = (event && event.detail) || {};
+    var requestId = String(detail.requestId || '');
+    if (!protocol.validateRequestId(requestId)) return;
+    var trustedImage;
+    try {
+      trustedImage = consumeTrustedContextImage(String(detail.url || ''));
+    } catch (error) {
+      replyImageContextAction(IMAGE_CONTEXT_DOWNLOAD_RESULT_EVENT, requestId, {
+        ok: false,
+        error: String(error && error.message || error),
+      });
+      return;
+    }
+    downloadTrustedContextImage(trustedImage.blobPromise).then(function () {
+      replyImageContextAction(IMAGE_CONTEXT_DOWNLOAD_RESULT_EVENT, requestId, {
+        ok: true,
+        downloaded: true,
+        mode: trustedImage.mode,
+      });
+    }).catch(function (error) {
+      replyImageContextAction(IMAGE_CONTEXT_DOWNLOAD_RESULT_EVENT, requestId, {
+        ok: false,
+        error: String(error && error.message || error),
+      });
     });
   }, true);
 
