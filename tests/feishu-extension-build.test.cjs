@@ -262,6 +262,27 @@ test('embedded charts are captured as structured image fallbacks without changin
   assert.match(artifacts.mainWorld, /applyBrowserWhiteboards\(transfer\)/);
 });
 
+test('runtime loads shared async helpers before both transfer modules', () => {
+  const asyncIndex = artifacts.mainWorld.indexOf('function scanVirtualScroller');
+  const chartIndex = artifacts.mainWorld.indexOf('function captureEmbeddedChartFallbacks');
+  const whiteboardIndex = artifacts.mainWorld.indexOf('function captureBrowserWhiteboards');
+  assert.ok(asyncIndex >= 0 && asyncIndex < chartIndex && asyncIndex < whiteboardIndex);
+  assert.match(artifacts.mainWorld, /mapWithConcurrency\(imageUrls, 3/);
+  assert.match(artifacts.mainWorld, /mapWithConcurrency\(keys, 3/);
+  assert.match(artifacts.mainWorld, /firstDelayMs: 110,\s+secondDelayMs: 220/);
+});
+
+test('image reconciliation skips only its redundant second text-settling wait', () => {
+  assert.match(artifacts.mainWorld, /imageSummary && imageSummary\.imageCount > 0\s+\? true\s+: waitForPasteBodySettled\(pending, 5000\)/);
+  assert.match(artifacts.mainWorld, /waitForPasteBodySettled\(pending, 12000\)/);
+});
+
+test('browser whiteboard apply relies on node verification without a fixed trailing delay', () => {
+  assert.match(artifacts.mainWorld, /function importIntoTargetWhiteboard/);
+  assert.match(artifacts.mainWorld, /countState\.count === expectedState\.count/);
+  assert.doesNotMatch(artifacts.mainWorld, /setTimeout\(resolve, 1800\)/);
+});
+
 test('browser whiteboard import binds InsertPage to the newly created target board', () => {
   assert.match(artifacts.mainWorld, /token: target\.targetWhiteboardToken/);
   assert.doesNotMatch(artifacts.mainWorld, /token: target\.board\.sourceWhiteboardToken/);

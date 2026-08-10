@@ -78,26 +78,19 @@
       });
     }
 
-    function scanAt(scrollTop) {
-      if (Object.keys(imageUrlByRecordId).length === charts.length) return Promise.resolve();
-      scroller.scrollTop = Math.min(maxScrollTop, scrollTop);
-      try { scroller.dispatchEvent(new Event('scroll')); } catch (error) {}
-      return new Promise(function (resolve) { setTimeout(resolve, 120); })
-        .then(captureLoadedCharts)
-        .then(function () {
-          return new Promise(function (resolve) { setTimeout(resolve, 180); });
-        })
-        .then(captureLoadedCharts);
-    }
-
-    captureLoadedCharts();
-    var scan = Promise.resolve();
-    for (var pass = 0; pass < 2; pass++) {
-      for (var y = 0; y <= maxScrollTop; y += step) {
-        (function (scrollTop) { scan = scan.then(function () { return scanAt(scrollTop); }); })(y);
-      }
-    }
-    scan = scan.then(function () { return scanAt(maxScrollTop); });
+    var scan = scanVirtualScroller({
+      scroller: scroller,
+      maxScrollTop: maxScrollTop,
+      step: step,
+      passes: 2,
+      firstDelayMs: 120,
+      secondDelayMs: 180,
+      captureInitially: true,
+      captureMissing: captureLoadedCharts,
+      isComplete: function () {
+        return Object.keys(imageUrlByRecordId).length === charts.length;
+      },
+    });
 
     return scan.then(function () {
       var missing = charts.filter(function (chart) { return !imageUrlByRecordId[chart.recordId]; });
@@ -109,17 +102,11 @@
         var imageUrl = imageUrlByRecordId[chart.recordId];
         if (imageUrls.indexOf(imageUrl) === -1) imageUrls.push(imageUrl);
       });
-      var nextIndex = 0;
-      function worker() {
-        if (nextIndex >= imageUrls.length) return Promise.resolve();
-        var imageUrl = imageUrls[nextIndex++];
+      return mapWithConcurrency(imageUrls, 3, function (imageUrl) {
         return fetchImageViaBackground(imageUrl).then(function (dataUrl) {
           dataUrlByImageUrl[imageUrl] = dataUrl;
-        }).then(worker);
-      }
-      var workers = [];
-      for (var i = 0; i < Math.min(3, imageUrls.length); i++) workers.push(worker());
-      return Promise.all(workers).then(function () {
+        });
+      }).then(function () {
         var byRecordId = {};
         charts.forEach(function (chart) {
           var dataUrl = dataUrlByImageUrl[imageUrlByRecordId[chart.recordId]];

@@ -210,25 +210,16 @@
       });
     }
 
-    function scanAt(scrollTop) {
-      if (Object.keys(found).length === transfer.boardCount) return Promise.resolve();
-      scroller.scrollTop = Math.min(maxScrollTop, scrollTop);
-      try { scroller.dispatchEvent(new Event('scroll')); } catch (error) {}
-      return new Promise(function (resolve) { setTimeout(resolve, 100); })
-        .then(captureLoadedBoards)
-        .then(function () {
-          return new Promise(function (resolve) { setTimeout(resolve, 220); });
-        })
-        .then(captureLoadedBoards);
-    }
-
-    var scan = Promise.resolve();
-    for (var pass = 0; pass < 3; pass++) {
-      for (var y = 0; y <= maxScrollTop; y += step) {
-        (function (scrollTop) { scan = scan.then(function () { return scanAt(scrollTop); }); })(y);
-      }
-    }
-    scan = scan.then(function () { return scanAt(maxScrollTop); });
+    var scan = scanVirtualScroller({
+      scroller: scroller,
+      maxScrollTop: maxScrollTop,
+      step: step,
+      passes: 3,
+      firstDelayMs: 100,
+      secondDelayMs: 220,
+      captureMissing: captureLoadedBoards,
+      isComplete: function () { return Object.keys(found).length === transfer.boardCount; },
+    });
 
     return scan.then(function () {
       if (Object.keys(found).length !== transfer.boardCount) {
@@ -244,17 +235,11 @@
       });
       var keys = Object.keys(uniqueUrls);
       var dataUrls = {};
-      var nextIndex = 0;
-      function worker() {
-        if (nextIndex >= keys.length) return Promise.resolve();
-        var key = keys[nextIndex++];
+      return mapWithConcurrency(keys, 3, function (key) {
         return fetchImageViaBackground(uniqueUrls[key]).then(function (dataUrl) {
           dataUrls[key] = dataUrl;
-        }).then(worker);
-      }
-      var workers = [];
-      for (var i = 0; i < Math.min(3, keys.length); i++) workers.push(worker());
-      return Promise.all(workers).then(function () {
+        });
+      }).then(function () {
         var cloned = JSON.parse(JSON.stringify(transfer));
         cloned.browserBoards = cloned.slots.map(function (slot) {
           var board = found[slot.slotId];
@@ -634,20 +619,21 @@
     var snapshot = captureValidationSnapshot();
     if (!snapshot) return null;
     var componentCounts = snapshot.semanticSnapshot && snapshot.semanticSnapshot.componentCounts || {};
-    var renderedWhiteboards = Math.max(
-      Number(snapshot.whiteboardCount || 0),
-      Number(componentCounts.whiteboard || 0)
-    );
+    var structuredWhiteboards = Number(snapshot.whiteboardCount || 0);
+    var renderedWhiteboards = structuredWhiteboards > 0
+      ? structuredWhiteboards
+      : Number(componentCounts.whiteboard || 0);
     // 图片只能来自结构化正文记录；DOM 语义扫描会把头像、图标和模板缩略图混入统计。
     var renderedImages = Number(snapshot.imageCount || 0);
-    var renderedEquations = Math.max(
-      Number(snapshot.equationCount || 0),
-      Number(componentCounts.equation || 0)
-    );
+    var structuredEquations = Number(snapshot.equationCount || 0);
+    var renderedEquations = structuredEquations > 0
+      ? structuredEquations
+      : Number(componentCounts.equation || 0);
 
     return validateOfficialDocumentSummary({
-      // blockCount 沿用 renderer 的正文口径；语义快照只补齐各自独立统计的富媒体，
-      // 不把画板再叠加进正文块数，避免重复计数。
+      // Struct Service 完整时 renderer 是正文计数真源。DOM 语义扫描会同时命中
+      // 画板/公式的外层 block、内部容器和渲染节点，只能在结构化计数为 0 时兜底，
+      // 否则会把 3 个画板放大成多个“组件”，并破坏权限回退的一致性校验。
       blockCount: Number(snapshot.blockCount || 0),
       equationCount: renderedEquations,
       imageCount: renderedImages,
@@ -971,7 +957,6 @@
       var appBySlot = {};
       var maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
       var step = Math.max(320, Math.floor((scroller.clientHeight || 600) * 0.7));
-      var scan = Promise.resolve();
       function captureApps() {
         targets.forEach(function (target) {
           if (appBySlot[target.slotId]) return;
@@ -987,23 +972,18 @@
           if (app) appBySlot[target.slotId] = app;
         });
       }
-      function scanAt(scrollTop) {
-        if (Object.keys(appBySlot).length === transfer.boardCount) return Promise.resolve();
-        scroller.scrollTop = Math.min(maxScrollTop, scrollTop);
-        try { scroller.dispatchEvent(new Event('scroll')); } catch (error) {}
-        return new Promise(function (resolve) { setTimeout(resolve, 110); })
-          .then(captureApps)
-          .then(function () {
-            return new Promise(function (resolve) { setTimeout(resolve, 220); });
-          })
-          .then(captureApps);
-      }
-      for (var pass = 0; pass < 2; pass++) {
-        for (var y = 0; y <= maxScrollTop; y += step) {
-          (function (scrollTop) { scan = scan.then(function () { return scanAt(scrollTop); }); })(y);
-        }
-      }
-      return scan.then(function () { return scanAt(maxScrollTop); }).then(function () {
+      return scanVirtualScroller({
+        scroller: scroller,
+        maxScrollTop: maxScrollTop,
+        step: step,
+        passes: 2,
+        firstDelayMs: 110,
+        secondDelayMs: 220,
+        captureMissing: captureApps,
+        isComplete: function () {
+          return Object.keys(appBySlot).length === transfer.boardCount;
+        },
+      }).then(function () {
         if (Object.keys(appBySlot).length !== transfer.boardCount) {
           throw new Error('目标画板未全部完成加载');
         }
@@ -1021,9 +1001,7 @@
           });
         });
         return chain.then(function () {
-          return new Promise(function (resolve) { setTimeout(resolve, 1800); }).then(function () {
-            return { status: 'complete', boardCount: imported.length, boards: imported, browserFallback: true };
-          });
+          return { status: 'complete', boardCount: imported.length, boards: imported, browserFallback: true };
         });
       }).finally(function () {
         scroller.scrollTop = originalScrollTop;

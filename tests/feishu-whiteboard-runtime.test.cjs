@@ -132,7 +132,7 @@ test('10 API whiteboard slots are markerized and rendered beyond the legacy 12-l
   assert.equal(api.assertWhiteboardMarkersInExtractedContent(content, transfer), true);
 });
 
-test('document inspect rejects native false-zero on a rendered personal document', async () => {
+test('document inspect rejects native false-zero without multiplying nested DOM media wrappers', async () => {
   const context = loadWhiteboardRuntime();
   const api = context.__whiteboardTestApi;
   context.requestWhiteboardNative = function () {
@@ -151,10 +151,10 @@ test('document inspect rejects native false-zero on a rendered personal document
   context.captureValidationSnapshot = function () {
     return {
       blockCount: 195,
-      equationCount: 0,
+      equationCount: 10,
       imageCount: 0,
       whiteboardCount: 4,
-      semanticSnapshot: { componentCounts: { image: 34, whiteboard: 10 } },
+      semanticSnapshot: { componentCounts: { image: 34, equation: 23, whiteboard: 10 } },
     };
   };
   context.setTimeout = function (callback) { callback(); return 0; };
@@ -163,9 +163,46 @@ test('document inspect rejects native false-zero on a rendered personal document
 
   assert.deepEqual(JSON.parse(JSON.stringify(await api.requestDocumentInspect())), {
     blockCount: 195,
-    equationCount: 0,
+    equationCount: 10,
     imageCount: 0,
-    whiteboardCount: 10,
+    whiteboardCount: 4,
+  });
+});
+
+test('document inspect uses DOM media counts only when structured counts are absent', async () => {
+  const context = loadWhiteboardRuntime();
+  const api = context.__whiteboardTestApi;
+  context.requestWhiteboardNative = function () {
+    return Promise.reject(new Error('No permission to operate on this document'));
+  };
+  context.getEditorReadyState = function () {
+    return {
+      readyState: 'complete',
+      hasContentRoot: true,
+      hasStructService: true,
+      hasRootBlock: true,
+      hasContentLoaded: true,
+    };
+  };
+  context.isVisibleDocumentBodyEmpty = function () { return false; };
+  context.captureValidationSnapshot = function () {
+    return {
+      blockCount: 3,
+      equationCount: 0,
+      imageCount: 0,
+      whiteboardCount: 0,
+      semanticSnapshot: { componentCounts: { equation: 2, whiteboard: 1 } },
+    };
+  };
+  context.setTimeout = function (callback) { callback(); return 0; };
+  let now = 0;
+  context.Date = { now: function () { now += 240; return now; } };
+
+  assert.deepEqual(JSON.parse(JSON.stringify(await api.requestDocumentInspect())), {
+    blockCount: 3,
+    equationCount: 2,
+    imageCount: 0,
+    whiteboardCount: 1,
   });
 });
 

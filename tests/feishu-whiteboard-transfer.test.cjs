@@ -715,13 +715,15 @@ test('commit recovery removes a surviving ownership marker without re-importing'
   assert.doesNotMatch(content, /OWNERSHIP/);
 });
 
-test('image bundle preflight uses target-shaped tokens and apply uploads exactly once', async (t) => {
+test('image bundle preflight uses target-shaped tokens and apply uploads each asset once with concurrency 3', async (t) => {
   const store = new BundleStore({ dataDir: makeTempDir(t) });
   const metadata = makeTransfer();
-  const assetId = 'b'.repeat(64);
+  const assetIds = ['b', 'c', 'd', 'e'].map((value) => value.repeat(64));
   const bundleDir = store.create(BUNDLE_ID);
-  const assetFile = path.join('assets', assetId + '.png');
-  fs.writeFileSync(path.join(bundleDir, assetFile), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const assetFiles = assetIds.map((assetId) => path.join('assets', assetId + '.png'));
+  assetFiles.forEach(function (assetFile) {
+    fs.writeFileSync(path.join(bundleDir, assetFile), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  });
   store.saveBundle({
     schemaVersion: 1,
     id: BUNDLE_ID,
@@ -732,15 +734,30 @@ test('image bundle preflight uses target-shaped tokens and apply uploads exactly
     boards: [{
       slotId: 'board-0001',
       sourceBlockId: 'source_board_1',
-      nodeCount: 1,
-      nodes: [{ id: 'image-1', type: 'image', image: { token: 'feishu-helper-asset:' + assetId } }],
-      bindings: [{ nodeIndex: 0, path: ['image', 'token'], assetId: assetId }],
+      nodeCount: assetIds.length,
+      nodes: assetIds.map((assetId, index) => ({
+        id: 'image-' + (index + 1),
+        type: 'image',
+        image: { token: 'feishu-helper-asset:' + assetId },
+      })),
+      bindings: assetIds.map((assetId, index) => ({
+        nodeIndex: index,
+        path: ['image', 'token'],
+        assetId: assetId,
+      })),
     }],
-    assets: [{ id: assetId, mime: 'image/png', byteLength: 8, file: assetFile }],
+    assets: assetIds.map((assetId, index) => ({
+      id: assetId,
+      mime: 'image/png',
+      byteLength: 8,
+      file: assetFiles[index],
+    })),
   });
 
   let content = '<p id="target_marker_1">' + metadata.slots[0].marker + '</p>';
   let uploadCount = 0;
+  let activeUploads = 0;
+  let maxActiveUploads = 0;
   let importedNodes = [];
   const documentCalls = [];
   const whiteboardCalls = [];
@@ -779,8 +796,13 @@ test('image bundle preflight uses target-shaped tokens and apply uploads exactly
     },
     async uploadWhiteboardMedia(options) {
       uploadCount += 1;
-      assert.equal(options.file, assetFile);
-      return 'target_image_token';
+      const index = assetFiles.indexOf(options.file);
+      assert.notEqual(index, -1);
+      activeUploads += 1;
+      maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeUploads -= 1;
+      return 'target_image_token_' + (index + 1);
     },
   };
   const service = new TransferService({ client: client, store: store });
@@ -793,10 +815,71 @@ test('image bundle preflight uses target-shaped tokens and apply uploads exactly
 
   const result = await service.apply(BUNDLE_ID, 'https://target.feishu.cn/docx/TargetDoc1');
   assert.equal(result.status, 'complete');
-  assert.equal(uploadCount, 1);
-  assert.equal(whiteboardCalls[1].nodes[0].image.token, 'target_image_token');
+  assert.equal(uploadCount, 4);
+  assert.equal(maxActiveUploads, 3);
+  assert.deepEqual(
+    whiteboardCalls[1].nodes.map((node) => node.image.token),
+    ['target_image_token_1', 'target_image_token_2', 'target_image_token_3', 'target_image_token_4']
+  );
   await service.apply(BUNDLE_ID, 'https://target.feishu.cn/docx/TargetDoc1');
-  assert.equal(uploadCount, 1);
+  assert.equal(uploadCount, 4);
+});
+
+test('preflight dry-runs boards with concurrency 3 and identifies the failing slot', async (t) => {
+  const store = new BundleStore({ dataDir: makeTempDir(t) });
+  const sourceBoards = Array.from({ length: 5 }, function (_, index) {
+    return { blockId: 'source_board_' + (index + 1) };
+  });
+  const metadata = transfer.createTransferMetadata(BUNDLE_ID, sourceBoards);
+  store.create(BUNDLE_ID);
+  store.saveBundle({
+    schemaVersion: 1,
+    id: BUNDLE_ID,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + transfer.BUNDLE_TTL_MS,
+    source: { url: 'https://source.feishu.cn/docx/Source1', documentId: 'Source1', revisionId: 1 },
+    transfer: metadata,
+    boards: metadata.slots.map(function (slot, index) {
+      return {
+        slotId: slot.slotId,
+        sourceBlockId: slot.sourceBlockId,
+        nodeCount: 1,
+        nodes: [{ id: 'node-' + (index + 1), type: 'shape' }],
+        bindings: [],
+      };
+    }),
+    assets: [],
+  });
+
+  let active = 0;
+  let maxActive = 0;
+  const client = {
+    async fetchDocument() {
+      return { document_id: 'TargetDoc1', revision_id: 1, content: '<p id="blank_1"> </p>' };
+    },
+    async canEditDocument() { return true; },
+    async updateDocument() { return { ok: true }; },
+    async updateWhiteboard() {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return { ok: true };
+    },
+  };
+  const service = new TransferService({ client: client, store: store });
+  const plan = await service.preflight(BUNDLE_ID, 'https://target.feishu.cn/docx/TargetDoc1');
+  assert.equal(plan.boardCount, 5);
+  assert.equal(maxActive, 3);
+
+  client.updateWhiteboard = async function (options) {
+    if (options.nodes[0].id === 'node-3') throw new Error('unsupported node');
+    return { ok: true };
+  };
+  await assert.rejects(
+    service.preflight(BUNDLE_ID, 'https://target.feishu.cn/docx/TargetDoc1'),
+    /board-0003 画板预检失败：unsupported node/
+  );
 });
 
 test('preflight rejects a read-only CLI identity before any target mutation', async (t) => {

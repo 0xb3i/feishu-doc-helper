@@ -812,18 +812,14 @@
 
   return Object.freeze({
     ACTIONS: ACTIONS,
-    ACTION_PENDING_OPS: ACTION_PENDING_OPS,
     CDN_HOST_SUFFIXES: CDN_HOST_SUFFIXES,
     DOCUMENT_HOST_SUFFIXES: DOCUMENT_HOST_SUFFIXES,
-    DOCUMENT_PATH_SEGMENTS: DOCUMENT_PATH_SEGMENTS,
     DOM_EVENTS: DOM_EVENTS,
     LIMITS: LIMITS,
     MESSAGES: MESSAGES,
     NATIVE_MESSAGING: NATIVE_MESSAGING,
     PENDING_OPS: PENDING_OPS,
-    getJsonByteLength: getJsonByteLength,
     buildDocumentMatchPatterns: buildDocumentMatchPatterns,
-    hostMatchesSuffix: hostMatchesSuffix,
     detectImageMime: detectImageMime,
     isAllowedImageMime: isAllowedImageMime,
     isPendingFresh: isPendingFresh,

@@ -154,7 +154,12 @@
             }).then(function (imageSummary) {
               result.imageReconciliation = imageSummary;
               delete result.targetImageDescriptors;
-              return waitForPasteBodySettled(pending, 5000);
+              // Image reconstruction already verifies every marker, staging record,
+              // target token and the final structured tree. Keep the second text
+              // settling guard only when no image-specific barrier ran.
+              return imageSummary && imageSummary.imageCount > 0
+                ? true
+                : waitForPasteBodySettled(pending, 5000);
             }).then(function () {
               // 飞书正文采用虚拟化渲染，DOM 不保证能同时看到全部 marker；
               // 图片归位直接通过当前编辑器的数据服务完成，不再 reload 丢弃尚未落云的正文。

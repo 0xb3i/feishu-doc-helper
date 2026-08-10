@@ -7,6 +7,8 @@ const transfer = require('../lib/feishu-whiteboard-transfer.cjs');
 
 const MAX_PARALLEL_EXPORTS = 3;
 const MAX_PARALLEL_DOWNLOADS = 3;
+const MAX_PARALLEL_PREFLIGHTS = 3;
+const MAX_PARALLEL_UPLOADS = 3;
 const WHITEBOARD_VERIFY_TIMEOUT_MS = 15000;
 const WHITEBOARD_VERIFY_INTERVAL_MS = 500;
 const BLANK_WHITEBOARD_XML = '<whiteboard type="blank"></whiteboard>';
@@ -263,6 +265,229 @@ function reconcileCompletedRollback(journal, transferMetadata, markers, existing
   return true;
 }
 
+function persistJournal(store, bundleId, targetDocumentId, journal, status) {
+  if (status) journal.status = status;
+  journal.updatedAt = Date.now();
+  store.saveJournal(bundleId, targetDocumentId, journal);
+}
+
+function assertOwnedBoard(document, marker, entry) {
+  let owned;
+  try {
+    owned = transfer.findOwnedWhiteboard(
+      document.content,
+      marker.marker,
+      entry.ownershipMarker
+    );
+  } catch (error) {
+    throw new TransferConflictError('目标画板所有权结构已被移动或替换，未自动删除任何画板');
+  }
+  if (!owned || owned.ownershipMarkerBlockId !== entry.ownershipMarkerBlockId
+    || owned.boardBlockId !== entry.boardBlockId || owned.boardToken !== entry.boardToken) {
+    throw new TransferConflictError('目标画板所有权无法验证，未自动删除任何画板');
+  }
+}
+
+async function ensureOwnedBoard(options) {
+  const opts = options || {};
+  const client = opts.client;
+  const store = opts.store;
+  const bundle = opts.bundle;
+  const marker = opts.marker;
+  const board = opts.board;
+  const journal = opts.journal;
+  const targetDocumentId = opts.targetDocumentId;
+  let document = opts.document;
+  let entry = journal.boards[board.slotId] || null;
+
+  if (entry && entry.boardBlockId) assertOwnedBoard(document, marker, entry);
+  if (entry && entry.state !== 'creating') return { document: document, entry: entry };
+  if (!entry && marker.followingBoard) {
+    throw new TransferConflictError('画板占位符后已有非本次迁移创建的画板，已停止以保护原内容');
+  }
+
+  const existingBoards = transfer.listDocumentWhiteboards(document.content);
+  if (!entry) {
+    entry = {
+      slotId: board.slotId,
+      markerBlockId: marker.markerBlockId,
+      state: 'creating',
+      baselineBoardIds: existingBoards.map((item) => item.blockId),
+      ownershipMarker: transfer.buildOwnershipMarker(
+        bundle.id,
+        board.slotId,
+        crypto.randomBytes(16).toString('hex')
+      ),
+      assetTokens: {},
+    };
+    journal.boards[board.slotId] = entry;
+    persistJournal(store, bundle.id, targetDocumentId, journal);
+  }
+  if (!transfer.OWNERSHIP_MARKER_RE.test(String(entry.ownershipMarker || ''))
+    || !Array.isArray(entry.baselineBoardIds)) {
+    throw new TransferConflictError('旧的创建中状态缺少可验证所有权，请重新提取后再粘贴');
+  }
+
+  const existingOwnershipBlock = transfer.findExactTextBlock(document.content, entry.ownershipMarker);
+  const baselineBoardIds = new Set(entry.baselineBoardIds);
+  const unownedNewBoards = existingBoards.filter(function (candidate) {
+    return !baselineBoardIds.has(candidate.blockId);
+  });
+  if (existingOwnershipBlock || marker.followingBoard || unownedNewBoards.length) {
+    throw new TransferConflictError('创建结果尚未持久化，无法证明相邻画板所有权；未覆盖或删除任何画板');
+  }
+
+  const updateResult = await client.updateDocument({
+    documentUrl: opts.canonicalTargetUrl,
+    command: 'block_insert_after',
+    blockId: marker.markerBlockId,
+    revisionId: document.revision_id,
+    content: buildOwnedWhiteboardXml(entry.ownershipMarker),
+  });
+  const returnedBoard = extractNewWhiteboardFromUpdate(updateResult);
+  if (!returnedBoard) {
+    throw new TransferConflictError('创建空白画板未返回唯一 block/token，未认领任何画板');
+  }
+
+  document = await client.fetchDocument(opts.targetUrl);
+  let owned;
+  try {
+    owned = transfer.findOwnedWhiteboard(document.content, marker.marker, entry.ownershipMarker);
+  } catch (error) {
+    throw new TransferConflictError('创建后的所有权结构无法验证，未认领任何画板');
+  }
+  if (!owned || owned.boardBlockId !== returnedBoard.blockId
+    || owned.boardToken !== returnedBoard.token || baselineBoardIds.has(owned.boardBlockId)) {
+    throw new TransferConflictError('创建返回与目标文档不一致，未认领任何画板');
+  }
+
+  entry.ownershipMarkerBlockId = owned.ownershipMarkerBlockId;
+  entry.boardBlockId = owned.boardBlockId;
+  entry.boardToken = owned.boardToken;
+  entry.state = 'created';
+  entry.assetTokens = entry.assetTokens || {};
+  entry.idempotentToken = transfer.createIdempotentToken(
+    bundle.id,
+    targetDocumentId,
+    board.slotId,
+    owned.boardToken
+  );
+  persistJournal(store, bundle.id, targetDocumentId, journal);
+  return { document: document, entry: entry };
+}
+
+async function uploadBoardAssets(options) {
+  const opts = options || {};
+  const entry = opts.entry;
+  const assetIds = Array.from(new Set((opts.board.bindings || []).map((binding) => binding.assetId)))
+    .filter((assetId) => !entry.assetTokens[assetId]);
+  await runPool(assetIds, MAX_PARALLEL_UPLOADS, async function (assetId, index) {
+    const asset = opts.assetById.get(assetId);
+    if (!asset) throw new Error('迁移包缺少画板图片资源');
+    const bundleDir = opts.store.bundleDir(opts.bundle.id);
+    const assetPath = path.join(bundleDir, asset.file);
+    const relativeAssetPath = path.relative(bundleDir, assetPath);
+    if (relativeAssetPath.startsWith('..') || path.isAbsolute(relativeAssetPath)) {
+      throw new Error('画板图片路径越界');
+    }
+    try {
+      entry.assetTokens[assetId] = await opts.client.uploadWhiteboardMedia({
+        documentId: opts.targetDocumentId,
+        boardToken: entry.boardToken,
+        file: relativeAssetPath,
+        cwd: bundleDir,
+      });
+    } catch (error) {
+      throw new Error(opts.board.slotId + ' 第 ' + (index + 1) + ' 个图片上传失败：'
+        + String(error && error.message || error));
+    }
+    persistJournal(opts.store, opts.bundle.id, opts.targetDocumentId, opts.journal);
+  });
+}
+
+async function importBoard(options) {
+  const opts = options || {};
+  const entry = opts.entry;
+  if (entry.state === 'imported') return;
+  await uploadBoardAssets(opts);
+  const targetNodes = transfer.applyTargetAssetTokens(
+    opts.board.nodes,
+    opts.board.bindings,
+    entry.assetTokens
+  );
+  await opts.client.updateWhiteboard({
+    boardToken: entry.boardToken,
+    nodes: targetNodes,
+    idempotentToken: entry.idempotentToken,
+    cwd: opts.store.bundleDir(opts.bundle.id),
+  });
+  await waitForWhiteboardImport(opts.client, entry.boardToken, targetNodes);
+  entry.state = 'imported';
+  persistJournal(opts.store, opts.bundle.id, opts.targetDocumentId, opts.journal);
+}
+
+async function rollbackCreatedBoards(options, originalError) {
+  const opts = options || {};
+  const journal = opts.journal;
+  const createdBlockIds = Object.values(journal.boards || {})
+    .map((entry) => String(entry.boardBlockId || ''))
+    .filter((blockId) => transfer.BLOCK_ID_RE.test(blockId));
+  if (!createdBlockIds.length) {
+    journal.lastError = journalFailureMessage(originalError);
+    persistJournal(opts.store, opts.bundle.id, opts.targetDocumentId, journal, 'retryableFailed');
+    return;
+  }
+
+  persistJournal(opts.store, opts.bundle.id, opts.targetDocumentId, journal, 'rollingBack');
+  try {
+    const beforeRollback = await opts.client.fetchDocument(opts.targetUrl);
+    const ownershipBlockIds = collectOwnershipCleanupBlockIds(
+      journal,
+      beforeRollback.content,
+      true,
+      opts.bundle.transfer
+    );
+    await opts.client.updateDocument({
+      documentUrl: opts.canonicalTargetUrl,
+      command: 'block_delete',
+      blockId: createdBlockIds.concat(ownershipBlockIds).join(','),
+      revisionId: beforeRollback.revision_id,
+    });
+    const afterRollback = await opts.client.fetchDocument(opts.targetUrl);
+    const remainingIds = new Set(transfer.listDocumentWhiteboards(afterRollback.content)
+      .map((board) => board.blockId));
+    if (createdBlockIds.some((blockId) => remainingIds.has(blockId))) {
+      throw new Error('回滚后仍检测到本次创建的画板');
+    }
+    const remainingOwnership = Object.values(journal.boards || {}).some(function (entry) {
+      return entry && entry.ownershipMarker
+        && transfer.findExactTextBlock(afterRollback.content, entry.ownershipMarker);
+    });
+    if (remainingOwnership) throw new Error('回滚后仍检测到迁移所有权标识');
+    const unresolved = Object.entries(journal.boards || {}).filter(function (pair) {
+      return !transfer.BLOCK_ID_RE.test(String(pair[1] && pair[1].boardBlockId || ''));
+    });
+    journal.boards = Object.fromEntries(unresolved);
+    persistJournal(
+      opts.store,
+      opts.bundle.id,
+      opts.targetDocumentId,
+      journal,
+      unresolved.length ? 'recoveryRequired' : 'rolledBack'
+    );
+  } catch (rollbackError) {
+    persistJournal(
+      opts.store,
+      opts.bundle.id,
+      opts.targetDocumentId,
+      journal,
+      rollbackError && rollbackError.skipRollback ? 'conflict' : 'rollbackFailed'
+    );
+    throw new Error(String(originalError.message || originalError)
+      + '；自动回滚失败：' + String(rollbackError.message || rollbackError));
+  }
+}
+
 class TransferService {
   constructor(options) {
     const opts = options || {};
@@ -476,20 +701,24 @@ class TransferService {
       )),
       dryRun: true,
     });
-    for (const board of bundle.boards) {
-      await this.client.updateWhiteboard({
-        boardToken: 'wbcn_feishu_helper_dry_run',
-        nodes: buildDryRunNodes(board),
-        idempotentToken: transfer.createIdempotentToken(
-          bundle.id,
-          String(document.document_id),
-          board.slotId,
-          'wbcn_feishu_helper_dry_run'
-        ),
-        dryRun: true,
-        cwd: this.store.bundleDir(bundle.id),
-      });
-    }
+    await runPool(bundle.boards, MAX_PARALLEL_PREFLIGHTS, async (board) => {
+      try {
+        await this.client.updateWhiteboard({
+          boardToken: 'wbcn_feishu_helper_dry_run',
+          nodes: buildDryRunNodes(board),
+          idempotentToken: transfer.createIdempotentToken(
+            bundle.id,
+            String(document.document_id),
+            board.slotId,
+            'wbcn_feishu_helper_dry_run'
+          ),
+          dryRun: true,
+          cwd: this.store.bundleDir(bundle.id),
+        });
+      } catch (error) {
+        throw new Error(board.slotId + ' 画板预检失败：' + String(error && error.message || error));
+      }
+    });
 
     return {
       needsBodyPaste: markers.length === 0,
@@ -522,7 +751,6 @@ class TransferService {
         targetUrl,
         targetDocumentId,
         journal,
-        document,
         true
       );
     }
@@ -543,7 +771,6 @@ class TransferService {
           targetUrl,
           targetDocumentId,
           journal,
-          document,
           true
         );
       }
@@ -578,205 +805,38 @@ class TransferService {
 
     const markerBySlot = new Map(markers.map((marker) => [marker.slotId, marker]));
     const assetById = new Map((bundle.assets || []).map((asset) => [asset.id, asset]));
+    const applyOptions = {
+      client: this.client,
+      store: this.store,
+      bundle: bundle,
+      targetUrl: targetUrl,
+      targetDocumentId: targetDocumentId,
+      canonicalTargetUrl: canonicalTargetUrl,
+      journal: journal,
+      assetById: assetById,
+    };
 
     try {
       for (const board of bundle.boards) {
         const marker = markerBySlot.get(board.slotId);
         if (!marker) throw new Error('画板占位符与迁移包不一致');
-        let entry = journal.boards[board.slotId] || null;
-        existingBoards = transfer.listDocumentWhiteboards(document.content);
-
-        if (entry && entry.boardBlockId) {
-          let owned;
-          try {
-            owned = transfer.findOwnedWhiteboard(
-              document.content,
-              marker.marker,
-              entry.ownershipMarker
-            );
-          } catch (error) {
-            throw new TransferConflictError('目标画板所有权结构已被移动或替换，未自动删除任何画板');
-          }
-          if (!owned) {
-            throw new TransferConflictError('目标画板所有权无法验证，未自动删除任何画板');
-          } else if (owned.ownershipMarkerBlockId !== entry.ownershipMarkerBlockId
-            || owned.boardBlockId !== entry.boardBlockId || owned.boardToken !== entry.boardToken) {
-            throw new TransferConflictError('目标画板所有权无法验证，未自动删除任何画板');
-          }
-        }
-
-        if (!entry || entry.state === 'creating') {
-          if (!entry && marker.followingBoard) {
-            throw new TransferConflictError('画板占位符后已有非本次迁移创建的画板，已停止以保护原内容');
-          }
-          if (!entry) {
-            entry = {
-              slotId: board.slotId,
-              markerBlockId: marker.markerBlockId,
-              state: 'creating',
-              baselineBoardIds: existingBoards.map((item) => item.blockId),
-              ownershipMarker: transfer.buildOwnershipMarker(
-                bundle.id,
-                board.slotId,
-                crypto.randomBytes(16).toString('hex')
-              ),
-              assetTokens: {},
-            };
-            journal.boards[board.slotId] = entry;
-            journal.updatedAt = Date.now();
-            this.store.saveJournal(bundle.id, targetDocumentId, journal);
-          }
-          if (!transfer.OWNERSHIP_MARKER_RE.test(String(entry.ownershipMarker || ''))
-            || !Array.isArray(entry.baselineBoardIds)) {
-            throw new TransferConflictError('旧的创建中状态缺少可验证所有权，请重新提取后再粘贴');
-          }
-          const existingOwnershipBlock = transfer.findExactTextBlock(
-            document.content,
-            entry.ownershipMarker
-          );
-          const baselineBoardIds = new Set(entry.baselineBoardIds);
-          const unownedNewBoards = existingBoards.filter(function (candidate) {
-            return !baselineBoardIds.has(candidate.blockId);
-          });
-          if (existingOwnershipBlock || marker.followingBoard || unownedNewBoards.length) {
-            throw new TransferConflictError('创建结果尚未持久化，无法证明相邻画板所有权；未覆盖或删除任何画板');
-          }
-          const updateResult = await this.client.updateDocument({
-            documentUrl: canonicalTargetUrl,
-            command: 'block_insert_after',
-            blockId: marker.markerBlockId,
-            revisionId: document.revision_id,
-            content: buildOwnedWhiteboardXml(entry.ownershipMarker),
-          });
-          const returnedBoard = extractNewWhiteboardFromUpdate(updateResult);
-          if (!returnedBoard) {
-            throw new TransferConflictError('创建空白画板未返回唯一 block/token，未认领任何画板');
-          }
-          document = await this.client.fetchDocument(targetUrl);
-          let owned;
-          try {
-            owned = transfer.findOwnedWhiteboard(
-              document.content,
-              marker.marker,
-              entry.ownershipMarker
-            );
-          } catch (error) {
-            throw new TransferConflictError('创建后的所有权结构无法验证，未认领任何画板');
-          }
-          if (!owned || owned.boardBlockId !== returnedBoard.blockId
-            || owned.boardToken !== returnedBoard.token
-            || baselineBoardIds.has(owned.boardBlockId)) {
-            throw new TransferConflictError('创建返回与目标文档不一致，未认领任何画板');
-          }
-          entry.ownershipMarkerBlockId = owned.ownershipMarkerBlockId;
-          entry.boardBlockId = owned.boardBlockId;
-          entry.boardToken = owned.boardToken;
-          entry.state = 'created';
-          entry.assetTokens = entry.assetTokens || {};
-          entry.idempotentToken = transfer.createIdempotentToken(
-            bundle.id,
-            targetDocumentId,
-            board.slotId,
-            owned.boardToken
-          );
-          journal.updatedAt = Date.now();
-          this.store.saveJournal(bundle.id, targetDocumentId, journal);
-        }
-
-        if (entry.state === 'imported') continue;
-        const assetIds = Array.from(new Set((board.bindings || []).map((binding) => binding.assetId)));
-        for (const assetId of assetIds) {
-          if (entry.assetTokens[assetId]) continue;
-          const asset = assetById.get(assetId);
-          if (!asset) throw new Error('迁移包缺少画板图片资源');
-          const assetPath = path.join(this.store.bundleDir(bundle.id), asset.file);
-          const relativeAssetPath = path.relative(this.store.bundleDir(bundle.id), assetPath);
-          if (relativeAssetPath.startsWith('..') || path.isAbsolute(relativeAssetPath)) {
-            throw new Error('画板图片路径越界');
-          }
-          entry.assetTokens[assetId] = await this.client.uploadWhiteboardMedia({
-            documentId: targetDocumentId,
-            boardToken: entry.boardToken,
-            file: relativeAssetPath,
-            cwd: this.store.bundleDir(bundle.id),
-          });
-          journal.updatedAt = Date.now();
-          this.store.saveJournal(bundle.id, targetDocumentId, journal);
-        }
-
-        const targetNodes = transfer.applyTargetAssetTokens(board.nodes, board.bindings, entry.assetTokens);
-        await this.client.updateWhiteboard({
-          boardToken: entry.boardToken,
-          nodes: targetNodes,
-          idempotentToken: entry.idempotentToken,
-          cwd: this.store.bundleDir(bundle.id),
-        });
-        // Whiteboard update is eventually consistent: the API acknowledges the
-        // write before a subsequent export exposes the nodes. Do not remove the
-        // document marker until the target board is observably complete.
-        await waitForWhiteboardImport(this.client, entry.boardToken, targetNodes);
-        entry.state = 'imported';
-        journal.updatedAt = Date.now();
-        this.store.saveJournal(bundle.id, targetDocumentId, journal);
+        const owned = await ensureOwnedBoard(Object.assign({}, applyOptions, {
+          board: board,
+          marker: marker,
+          document: document,
+        }));
+        document = owned.document;
+        await importBoard(Object.assign({}, applyOptions, {
+          board: board,
+          entry: owned.entry,
+        }));
       }
     } catch (error) {
       if (error && error.skipRollback) {
-        journal.status = 'conflict';
-        journal.updatedAt = Date.now();
-        this.store.saveJournal(bundle.id, targetDocumentId, journal);
+        persistJournal(this.store, bundle.id, targetDocumentId, journal, 'conflict');
         throw error;
       }
-      const createdBlockIds = Object.values(journal.boards || {})
-        .map((entry) => String(entry.boardBlockId || ''))
-        .filter((blockId) => transfer.BLOCK_ID_RE.test(blockId));
-      if (createdBlockIds.length) {
-        journal.status = 'rollingBack';
-        journal.updatedAt = Date.now();
-        this.store.saveJournal(bundle.id, targetDocumentId, journal);
-        try {
-          const beforeRollback = await this.client.fetchDocument(targetUrl);
-          const ownershipBlockIds = collectOwnershipCleanupBlockIds(
-            journal,
-            beforeRollback.content,
-            true,
-            bundle.transfer
-          );
-          await this.client.updateDocument({
-            documentUrl: canonicalTargetUrl,
-            command: 'block_delete',
-            blockId: createdBlockIds.concat(ownershipBlockIds).join(','),
-            revisionId: beforeRollback.revision_id,
-          });
-          const afterRollback = await this.client.fetchDocument(targetUrl);
-          const remainingIds = new Set(transfer.listDocumentWhiteboards(afterRollback.content)
-            .map((board) => board.blockId));
-          const notDeleted = createdBlockIds.filter((blockId) => remainingIds.has(blockId));
-          if (notDeleted.length) throw new Error('回滚后仍检测到本次创建的画板');
-          const remainingOwnership = Object.values(journal.boards || {}).some(function (entry) {
-            return entry && entry.ownershipMarker
-              && transfer.findExactTextBlock(afterRollback.content, entry.ownershipMarker);
-          });
-          if (remainingOwnership) throw new Error('回滚后仍检测到迁移所有权标识');
-          const unresolved = Object.entries(journal.boards || {}).filter(function (pair) {
-            return !transfer.BLOCK_ID_RE.test(String(pair[1] && pair[1].boardBlockId || ''));
-          });
-          journal.boards = Object.fromEntries(unresolved);
-          journal.status = unresolved.length ? 'recoveryRequired' : 'rolledBack';
-          journal.updatedAt = Date.now();
-          this.store.saveJournal(bundle.id, targetDocumentId, journal);
-        } catch (rollbackError) {
-          journal.status = rollbackError && rollbackError.skipRollback ? 'conflict' : 'rollbackFailed';
-          journal.updatedAt = Date.now();
-          this.store.saveJournal(bundle.id, targetDocumentId, journal);
-          throw new Error(String(error.message || error)
-            + '；自动回滚失败：' + String(rollbackError.message || rollbackError));
-        }
-      } else {
-        journal.status = 'retryableFailed';
-        journal.lastError = journalFailureMessage(error);
-        journal.updatedAt = Date.now();
-        this.store.saveJournal(bundle.id, targetDocumentId, journal);
-      }
+      await rollbackCreatedBoards(applyOptions, error);
       throw error;
     }
 
@@ -785,21 +845,18 @@ class TransferService {
       targetUrl,
       targetDocumentId,
       journal,
-      document,
       false
     );
   }
 
-  async finalizeImportedJournal(bundle, targetUrl, targetDocumentId, journal, _currentDocument, alreadyComplete) {
+  async finalizeImportedJournal(bundle, targetUrl, targetDocumentId, journal, alreadyComplete) {
     const canonicalTargetUrl = buildCanonicalDocumentUrl(targetUrl, targetDocumentId);
     let document = await this.client.fetchDocument(targetUrl);
     let existingBoards = transfer.listDocumentWhiteboards(document.content);
     if (!importedJournalBoardsPresent(journal, existingBoards, bundle.transfer.boardCount)) {
       throw new Error('迁移完成校验发现目标画板缺失');
     }
-    journal.status = 'committing';
-    journal.updatedAt = Date.now();
-    this.store.saveJournal(bundle.id, targetDocumentId, journal);
+    persistJournal(this.store, bundle.id, targetDocumentId, journal, 'committing');
     try {
       const markers = transfer.findTransferMarkers(document.content, bundle.transfer);
       const ownershipBlockIds = collectOwnershipCleanupBlockIds(journal, document.content, false);
@@ -828,9 +885,13 @@ class TransferService {
         throw new Error('迁移完成校验发现目标画板缺失');
       }
     } catch (error) {
-      journal.status = error && error.skipRollback ? 'conflict' : 'commitPending';
-      journal.updatedAt = Date.now();
-      this.store.saveJournal(bundle.id, targetDocumentId, journal);
+      persistJournal(
+        this.store,
+        bundle.id,
+        targetDocumentId,
+        journal,
+        error && error.skipRollback ? 'conflict' : 'commitPending'
+      );
       if (error && error.skipRollback) throw error;
       throw new Error('画板已写入，但占位符清理待重试：' + String(error.message || error));
     }
@@ -899,26 +960,15 @@ class TransferService {
     return { status: 'complete', imageCount: bindings.length };
   }
 
-  discard(bundleId) {
-    this.store.discard(bundleId);
-    return { discarded: true };
-  }
 }
 
 module.exports = {
-  BLANK_WHITEBOARD_XML,
-  TransferConflictError,
   TransferService,
   buildCanonicalDocumentUrl,
   buildDryRunNodes,
-  buildOwnedWhiteboardXml,
   collectOwnershipCleanupBlockIds,
-  detectImageFile,
   extractNewWhiteboardFromUpdate,
-  findDownloadedFile,
   reconcileCompletedRollback,
-  runPool,
-  summarizeWhiteboardNodeTypes,
   waitForWhiteboardImport,
   whiteboardNodesMatch,
 };
