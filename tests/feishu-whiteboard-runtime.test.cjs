@@ -42,6 +42,7 @@ function loadWhiteboardRuntime() {
     + 'isValidWhiteboardTransfer: isValidWhiteboardTransfer,'
     + 'hasBrowserWhiteboardPayload: hasBrowserWhiteboardPayload,'
     + 'rollbackBrowserWhiteboardTargets: rollbackBrowserWhiteboardTargets,'
+    + 'clearTargetWhiteboardSelection: clearTargetWhiteboardSelection,'
     + 'requestWhiteboardExport: requestWhiteboardExport,'
     + 'requestDocumentInspect: requestDocumentInspect,'
     + 'buildBrowserDocumentSummary: buildBrowserDocumentSummary,'
@@ -108,6 +109,22 @@ test('browser whiteboard rollback restores every replaced marker snapshot', asyn
     { recordId: 'record-one', path: [], snapshot: snapshots[0] },
     { recordId: 'record-two', path: [], snapshot: snapshots[1] },
   ]);
+});
+
+test('browser whiteboard import clears the runtime node selection', () => {
+  const api = loadWhiteboardRuntime().__whiteboardTestApi;
+  const commands = [];
+  assert.equal(api.clearTargetWhiteboardSelection({
+    commandManager: { execute(command) { commands.push(command); } },
+  }), true);
+  assert.deepEqual(commands, ['UnSelectAll']);
+
+  let fallbackCleared = false;
+  assert.equal(api.clearTargetWhiteboardSelection({
+    commandManager: { execute() { throw new Error('unsupported command'); } },
+    selectManager: { clear() { fallbackCleared = true; } },
+  }), true);
+  assert.equal(fallbackCleared, true);
 });
 
 function block(id, snapshot, children) {

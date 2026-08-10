@@ -888,6 +888,23 @@
     });
   }
 
+  function clearTargetWhiteboardSelection(app) {
+    if (!app) return false;
+    try {
+      if (app.commandManager && typeof app.commandManager.execute === 'function') {
+        app.commandManager.execute('UnSelectAll', null);
+        return true;
+      }
+    } catch (error) {}
+    try {
+      if (app.selectManager && typeof app.selectManager.clear === 'function') {
+        app.selectManager.clear();
+        return true;
+      }
+    } catch (error) {}
+    return false;
+  }
+
   function importIntoTargetWhiteboard(app, target) {
     var assets = target.board.assets || [];
     var uploaded = {};
@@ -924,6 +941,7 @@
             countWhiteboardPageDetailNodes(expected.nodes, 0, expectedState);
             countWhiteboardPageDetailNodes(actual.nodes, 0, countState);
             if (countState.count === expectedState.count) {
+              clearTargetWhiteboardSelection(app);
               resolve({ slotId: target.slotId, nodeCount: countState.count });
               return;
             }

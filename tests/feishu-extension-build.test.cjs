@@ -340,6 +340,8 @@ test('browser whiteboard apply relies on node verification without a fixed trail
 
 test('browser whiteboard import binds InsertPage to the newly created target board', () => {
   assert.match(artifacts.mainWorld, /token: target\.targetWhiteboardToken/);
+  assert.match(artifacts.mainWorld, /execute\('UnSelectAll', null\)/);
+  assert.match(artifacts.mainWorld, /clearTargetWhiteboardSelection\(app\)/);
   assert.doesNotMatch(artifacts.mainWorld, /token: target\.board\.sourceWhiteboardToken/);
 });
 
