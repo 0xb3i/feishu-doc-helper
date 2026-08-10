@@ -266,16 +266,39 @@ function AlertBox({ type, title, text }) {
   );
 }
 
-function ProgressBar({ percent, label, done, total }) {
+function createProgressState(phase, label, done, total) {
+  const normalizedTotal = Math.max(0, Number(total || 0));
+  const normalizedDone = Math.max(0, Number(done || 0));
+  return {
+    phase: String(phase || ''),
+    label: String(label || '处理中'),
+    done: normalizedDone,
+    total: normalizedTotal,
+    percent: normalizedTotal > 0 ? (normalizedDone / normalizedTotal) * 100 : 0,
+    indeterminate: normalizedTotal <= 0,
+  };
+}
+
+function ProgressBar({ percent, label, done, total, indeterminate }) {
   const clamped = Math.max(0, Math.min(100, Math.round(percent)));
   return (
-    <div className="progress" role="progressbar" aria-valuenow={clamped} aria-valuemin={0} aria-valuemax={100}>
+    <div
+      className={'progress' + (indeterminate ? ' progress--indeterminate' : '')}
+      role="progressbar"
+      aria-valuenow={indeterminate ? undefined : clamped}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuetext={indeterminate ? label + '，处理中' : undefined}
+    >
       <div className="progress__head">
         <span className="progress__label">{label}</span>
-        <span className="progress__count">{total > 0 ? done + ' / ' + total : clamped + '%'}</span>
+        <span className="progress__count">{indeterminate ? '处理中' : done + ' / ' + total}</span>
       </div>
       <div className="progress__track">
-        <div className="progress__fill" style={{ width: clamped + '%' }} />
+        <div
+          className={'progress__fill' + (indeterminate ? ' progress__fill--indeterminate' : '')}
+          style={indeterminate ? undefined : { width: clamped + '%' }}
+        />
       </div>
     </div>
   );
@@ -371,7 +394,8 @@ function Panel() {
     nextLocalActionIdRef.current = localActionId;
     localActionRef.current = { id: localActionId, action: action };
     setRunningAction(action);
-    setProgress(null);
+    setLastResult(null);
+    setProgress(createProgressState('starting', '准备' + getActionTitle(action), 0, 0));
     setStatus({ type: 'info', text: '正在执行：' + getActionTitle(action) });
     sendFeishuAction(action).then(function (result) {
       if (!localActionRef.current || localActionRef.current.id !== localActionId) return;
@@ -411,7 +435,8 @@ function Panel() {
     nextLocalActionIdRef.current = localActionId;
     localActionRef.current = { id: localActionId, action: 'snapshot' };
     setRunningAction('snapshot');
-    setProgress(null);
+    setLastResult(null);
+    setProgress(createProgressState('starting', '准备' + getActionTitle('snapshot'), 0, 0));
     setStatus({ type: 'info', text: '正在执行：' + getActionTitle('snapshot') });
     scanMetrics(target).then(function (summary) {
       if (!summary || !localActionRef.current || localActionRef.current.id !== localActionId) return;
@@ -449,7 +474,10 @@ function Panel() {
       if (!sender || !sender.tab || sender.tab.id !== target.tabId) return;
       const requestId = String(message.requestId || '');
       if (!requestId) return;
-      if (message.state === 'start') progressRequestIdRef.current = requestId;
+      if (message.state === 'start') {
+        progressRequestIdRef.current = requestId;
+        setLastResult(null);
+      }
       else if (progressRequestIdRef.current && progressRequestIdRef.current !== requestId) return;
       else if (!progressRequestIdRef.current) progressRequestIdRef.current = requestId;
 
@@ -460,19 +488,19 @@ function Panel() {
         setProgress(null);
         const localAction = localActionRef.current;
         if (localAction && localAction.action === message.action) return;
-        setRunningAction(function (current) {
-          if (current && current === message.action) {
-            const ok = String(message.status || 'success') !== 'error';
-            const detail = String(ok ? (message.notice || '') : (message.error || message.notice || '')).trim();
-            setStatus({
-              type: ok ? 'success' : 'error',
-              text: detail || (ok
-                ? getActionTitle(message.action) + '已完成。'
-                : getActionTitle(message.action) + '执行失败。'),
-            });
-          }
-          return current === message.action ? '' : current;
+        const ok = String(message.status || 'success') !== 'error';
+        const detail = String(ok ? (message.notice || '') : (message.error || message.notice || '')).trim();
+        const completionText = detail || (ok
+          ? getActionTitle(message.action) + '已完成。'
+          : getActionTitle(message.action) + '执行失败。');
+        setStatus({ type: ok ? 'success' : 'error', text: completionText });
+        setLastResult({
+          action: message.action,
+          type: ok ? 'success' : 'error',
+          text: completionText,
+          summary: normalizeSummary(),
         });
+        setRunningAction(function (current) { return current === message.action ? '' : current; });
         return;
       }
 
@@ -481,20 +509,10 @@ function Panel() {
       }
       const total = Number(message.total || 0);
       const done = Number(message.done || 0);
-      if (message.state === 'start') return;
-      if (total <= 0) {
-        const label = String(message.label || '').trim();
-        if (label) setStatus({ type: 'info', text: label + '…' });
-        return;
-      }
-      const percent = total > 0 ? (done / total) * 100 : 0;
-      setProgress({
-        phase: String(message.phase || ''),
-        label: String(message.label || '处理中'),
-        done: done,
-        total: total,
-        percent: percent,
-      });
+      const label = String(message.label || '').trim()
+        || (message.state === 'start' ? '准备' + getActionTitle(message.action) : '处理中');
+      setStatus({ type: 'info', text: label + '…' });
+      setProgress(createProgressState(message.phase, label, done, total));
     }
     chrome.runtime.onMessage.addListener(onMessage);
     return function () { chrome.runtime.onMessage.removeListener(onMessage); };
@@ -518,16 +536,15 @@ function Panel() {
         const label = String(record.label || '').trim();
         setStatus({
           type: 'info',
-          text: total <= 0 && label ? label + '…' : '正在执行：' + getActionTitle(record.action),
+          text: label ? label + '…' : '正在执行：' + getActionTitle(record.action),
         });
-        if (total <= 0) return;
-        setProgress({
-          phase: String(record.phase || ''),
-          label: String(record.label || '处理中'),
-          done: done,
-          total: total,
-          percent: total > 0 ? (done / total) * 100 : 0,
-        });
+        setLastResult(null);
+        setProgress(createProgressState(
+          record.phase,
+          label || '准备' + getActionTitle(record.action),
+          done,
+          total
+        ));
       });
     }).catch(function () {});
   }, []);
@@ -629,13 +646,14 @@ function Panel() {
           label={progress.label || getActionTitle(runningAction)}
           done={progress.done}
           total={progress.total}
+          indeterminate={progress.indeterminate}
         />
       ) : null}
 
-      {status.type !== 'info' || lastResult ? (
+      {!runningAction && (status.type !== 'info' || lastResult) ? (
         <AlertBox
           type={status.type}
-          title={lastResult ? getActionTitle(lastResult.action) : '进行中'}
+          title={lastResult ? getActionTitle(lastResult.action) : '状态'}
           text={status.text}
         />
       ) : null}

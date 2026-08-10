@@ -253,10 +253,15 @@ test('image conversion also uses bounded parallelism', () => {
   assert.match(artifacts.mainWorld, /return Promise\.all\(workers\)\.then/);
 });
 
-test('popup does not render a progress bar for action start messages without totals', () => {
-  assert.match(artifacts.popupSource, /if \(message\.state === 'start'\) return/);
-  assert.match(artifacts.popupSource, /if \(total <= 0\)/);
-  assert.match(artifacts.popupSource, /setStatus\(\{ type: 'info', text: label \+ '…' \}\)/);
+test('popup renders one authoritative progress state for counted and uncounted phases', () => {
+  assert.match(artifacts.popupSource, /function createProgressState/);
+  assert.match(artifacts.popupSource, /indeterminate: normalizedTotal <= 0/);
+  assert.match(artifacts.popupSource, /setProgress\(createProgressState\(message\.phase, label, done, total\)\)/);
+  assert.match(artifacts.popupSource, /setLastResult\(null\)/);
+  assert.match(artifacts.popupSource, /!runningAction && \(status\.type !== 'info' \|\| lastResult\)/);
+  assert.match(artifacts.popupCss, /\.progress__fill--indeterminate/);
+  assert.match(artifacts.popupCss, /@keyframes progress-indeterminate/);
+  assert.doesNotMatch(artifacts.popupSource, /if \(total <= 0\) return/);
 });
 
 test('popup automatically scans once per page session and refreshes only on manual snapshot', () => {

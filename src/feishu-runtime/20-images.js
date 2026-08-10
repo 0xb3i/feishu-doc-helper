@@ -65,16 +65,23 @@
 
     var done = 0;
     var total = workItems.reduce(function (sum, item) { return sum + item.count; }, 0);
+    var embeddedChartTotal = workItems.reduce(function (sum, item) {
+      return sum + (tokenToBase64[item.token] ? item.count : 0);
+    }, 0);
+    var imageTotal = Math.max(0, total - embeddedChartTotal);
+    var progressLabel = embeddedChartTotal > 0
+      ? '转换资源（' + imageTotal + ' 图片 + ' + embeddedChartTotal + ' 图表）'
+      : '转换图片';
     var nextIndex = 0;
     var concurrency = Math.min(5, workItems.length);
     showToast('📷 转换图片中 0/' + total);
-    emitUiProgress({ phase: 'convert', done: 0, total: total, label: '转换图片' });
+    emitUiProgress({ phase: 'convert', done: 0, total: total, label: progressLabel });
 
     function convertOne(group) {
       function finish(base64) {
         done += group.count;
         showToast('📷 转换图片中 ' + done + '/' + total);
-        emitUiProgress({ phase: 'convert', done: done, total: total, label: '转换图片' });
+        emitUiProgress({ phase: 'convert', done: done, total: total, label: progressLabel });
         if (base64) {
           group.htmlItems.forEach(function (item) {
             html = html.replace(item.full, 'src="' + IMAGE_PLACEHOLDER_SRC + '"');

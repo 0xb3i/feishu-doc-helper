@@ -368,6 +368,12 @@ button {
   transition: width 0.3s cubic-bezier(0.08, 0.82, 0.17, 1);
 }
 
+.progress__fill--indeterminate {
+  width: 36%;
+  min-width: 36%;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+
 /* Ant 风格：填充上掠过一道高光，强调"进行中" */
 .progress__fill::after {
   content: '';
@@ -389,6 +395,12 @@ button {
 @keyframes progress-shimmer {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(100%); }
+}
+
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-110%); }
+  50% { transform: translateX(90%); }
+  100% { transform: translateX(280%); }
 }
 
 /* ---------- Alert (Ant Alert 反馈) ---------- */

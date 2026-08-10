@@ -151,6 +151,12 @@ test('preloaded embedded-chart images reuse trusted bytes without a source-token
   assert.equal(result.tokenToBase64[chartToken], dataUrl);
   assert.equal(runtime.fetchedUrls.length, 0);
   assert.match(result.html, /data:image\/gif;base64,placeholder/);
+  assert.deepEqual(runtime.progress[0], {
+    phase: 'convert', done: 0, total: 1, label: '转换资源（0 图片 + 1 图表）',
+  });
+  assert.deepEqual(runtime.progress.at(-1), {
+    phase: 'convert', done: 1, total: 1, label: '转换资源（0 图片 + 1 图表）',
+  });
 });
 
 test('image paste descriptors reject incomplete source image data', () => {
