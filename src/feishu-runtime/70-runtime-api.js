@@ -3,8 +3,6 @@
     extraction: {
       extractFullDoc: extractFullDoc,
       extractPageIconEmojiFromDom: extractPageIconEmojiFromDom,
-      duplicateDocumentForAutomation: duplicateDocumentForAutomation,
-      preparePendingPasteForNativePaste: preparePendingPasteForNativePaste,
       captureValidationSnapshot: captureValidationSnapshot,
       getEditorReadyState: getEditorReadyState,
     },
@@ -12,11 +10,5 @@
       buildClipboardPayload: buildClipboardPayload,
       writeClipboardPayload: writeClipboardPayload,
       applyPageIconEmojiToCurrentDoc: applyPageIconEmojiToCurrentDoc,
-      pasteIntoDoc: pasteIntoDoc,
-    },
-    automation: {
-      runAutomationAction: runAutomationAction,
-      requestEvent: AUTOMATION_REQUEST_EVENT,
-      resultEvent: AUTOMATION_RESULT_EVENT,
     },
   };

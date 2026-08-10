@@ -37,14 +37,27 @@
     };
   }
 
-  function extractFullDoc() {
+  function extractFullDoc(whiteboardTransfer, embeddedChartFallbacks) {
     var ss = getStructService();
     if (!ss || !ss.rootBlock) return extractVisibleDomFallback();
 
-    var rendered = renderer.renderRootBlock(ss.rootBlock, {
+    var renderRoot = cloneBlockTreeWithEmbeddedChartImages(ss.rootBlock, embeddedChartFallbacks);
+    var transferredWhiteboardCount = 0;
+    var renderMaxDepth = MAX_BLOCK_DEPTH;
+    if (whiteboardTransfer) {
+      var markerClone = cloneBlockTreeWithWhiteboardMarkers(renderRoot, whiteboardTransfer);
+      if (markerClone.unmatchedSlots.length || markerClone.duplicateSlots.length) {
+        throw new Error('画板槽位与当前文档结构不一致，请刷新源文档后重新提取');
+      }
+      renderRoot = markerClone.rootBlock;
+      transferredWhiteboardCount = markerClone.matchedCount;
+      renderMaxDepth = Math.max(MAX_BLOCK_DEPTH, markerClone.maxMatchedDepth);
+    }
+
+    var rendered = renderer.renderRootBlock(renderRoot, {
       calloutStyleResolver: extractCalloutStyleFromDOM,
       locationOrigin: location.origin,
-      maxDepth: MAX_BLOCK_DEPTH,
+      maxDepth: renderMaxDepth,
     });
     var finalHtml = sanitizer.finalizeHtmlFragment(rendered.htmlParts.join('\n'));
     var finalText = attribs.normalizePlainText(rendered.mdParts.join('\n'));
@@ -55,19 +68,29 @@
         blockCount: 0,
         equationCount: 0,
         imageCount: 0,
+        whiteboardCount: 0,
         docxRecord: '',
       };
     }
-    var docxRecordPayload = renderer.buildDocxRecordPayload(ss.rootBlock, { maxDepth: MAX_BLOCK_DEPTH });
+    var docxRecordPayload = renderer.buildDocxRecordPayload(renderRoot, { maxDepth: renderMaxDepth });
     var docxRecordRaw = docxRecordPayload ? JSON.stringify(docxRecordPayload) : '';
-    return {
+    var content = {
       html: finalHtml,
       text: finalText,
       blockCount: rendered.blockCount,
       equationCount: rendered.equationCount,
       imageCount: listImageRecordsFromDocxRecord(docxRecordRaw).length,
+      whiteboardCount: whiteboardTransfer
+        ? transferredWhiteboardCount
+        : Number((rendered.blockTypeCounts && rendered.blockTypeCounts.whiteboard) || 0),
       docxRecord: docxRecordRaw,
     };
+    if (embeddedChartFallbacks && embeddedChartFallbacks.count) {
+      content.embeddedChartCount = embeddedChartFallbacks.count;
+      content.preloadedImageDataUrls = getEmbeddedChartPreloadedImages(embeddedChartFallbacks);
+    }
+    if (whiteboardTransfer) assertWhiteboardMarkersInExtractedContent(content, whiteboardTransfer);
+    return content;
   }
 
   function captureValidationSnapshot() {
@@ -86,6 +109,7 @@
       blockCount: Number(content.blockCount || 0),
       equationCount: Number(content.equationCount || 0),
       imageCount: countExtractedImages(content),
+      whiteboardCount: Number(content.whiteboardCount || 0),
       semanticSnapshot: semanticSnapshot,
     };
     setDocJsonAttr('data-feishu-validation-snapshot', {
@@ -93,6 +117,7 @@
       blockCount: snapshot.blockCount,
       equationCount: snapshot.equationCount,
       imageCount: snapshot.imageCount,
+      whiteboardCount: snapshot.whiteboardCount,
       textLength: snapshot.textLength,
       htmlLength: snapshot.htmlLength,
       semanticSnapshot: snapshot.semanticSnapshot,

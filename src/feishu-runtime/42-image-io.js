@@ -210,7 +210,7 @@
 
     // data:/blob: URL 直接读取，无需网络。
     if (/^(data:|blob:)/i.test(String(url))) {
-      return originalFetch(url).then(function (res) { return res.blob(); }).then(writeBlobToClipboard);
+      return pageFetch(url).then(function (res) { return res.blob(); }).then(writeBlobToClipboard);
     }
 
     var attempt = Promise.reject(new Error('start'));
@@ -228,7 +228,7 @@
     attempt = attempt.catch(function () { return blobFromCorsReload(url); });
     // 4) 最后兜底：页面上下文原始 fetch（可能被复制保护/CORS 拒绝）。
     attempt = attempt.catch(function () {
-      return originalFetch(url, { credentials: 'include' }).then(function (res) {
+      return pageFetch(url, { credentials: 'include' }).then(function (res) {
         if (!res.ok) throw new Error('fetch failed');
         return res.blob();
       });

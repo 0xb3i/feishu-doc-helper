@@ -13,6 +13,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const vm = require('vm');
 const protocol = require('../extension/shared/protocol.js');
+const extensionIdentity = require('../extension/extension-identity.json');
 
 const ROOT = path.resolve(__dirname, '..');
 const DIST = path.join(ROOT, 'dist/feishu-extension');
@@ -24,6 +25,8 @@ const IMAGE_HOSTS = protocol.CDN_HOST_SUFFIXES.map(function (host) {
   return 'https://*.' + host + '/*';
 }).concat(protocol.DOCUMENT_HOST_SUFFIXES.map(function (host) {
   return 'https://*.' + host + '/space/api/box/stream/download/*';
+})).concat(protocol.DOCUMENT_HOST_SUFFIXES.map(function (host) {
+  return 'https://*.' + host + '/space/api/file/f/cdp-chart-*';
 }));
 
 // Pure helper modules (CommonJS) shared by the page runtime.  Each must end
@@ -169,8 +172,18 @@ function buildManifest(packageJson) {
     minimum_chrome_version: '111',
     name: '飞书文档助手',
     version: version,
+    key: extensionIdentity.publicKey,
     description: '飞书文档复制、粘贴与图片提取菜单',
-    permissions: ['storage', 'unlimitedStorage', 'contextMenus', 'commands', 'alarms'],
+    permissions: [
+      'storage',
+      'unlimitedStorage',
+      'contextMenus',
+      'commands',
+      'alarms',
+      'nativeMessaging',
+      'clipboardRead',
+      'clipboardWrite',
+    ],
     host_permissions: Array.from(new Set(MATCHES.concat(IMAGE_HOSTS))),
     icons: {
       16: 'icons/icon-16.png',
@@ -200,7 +213,7 @@ function buildManifest(packageJson) {
       },
       {
         matches: MATCHES,
-        js: ['shared/protocol.js', 'content/bridge.js'],
+        js: ['shared/protocol.js', 'shared/image-clipboard.js', 'content/bridge.js'],
         run_at: 'document_start',
       },
     ],
@@ -308,6 +321,7 @@ function build() {
     writeJson('manifest.json', buildManifest(packageJson), stagingDir);
     fs.writeFileSync(path.join(stagingDir, 'content/main-world.js'), buildMainWorldScript(version));
     copyFile('extension/shared/protocol.js', 'shared/protocol.js', stagingDir);
+    copyFile('extension/shared/image-clipboard.js', 'shared/image-clipboard.js', stagingDir);
     copyFile('extension/content/bridge.js', 'content/bridge.js', stagingDir);
     copyFile('extension/background/service-worker.js', 'background/service-worker.js', stagingDir);
     ['16', '32', '48', '128'].forEach(function (size) {

@@ -1,47 +1,19 @@
   // ── Pending paste storage ──────────────────────────────────────────────────
 
-  var PENDING_PASTE_TTL_MS = 3600000;
-
-  // Token map for uploaded images (oldToken -> newToken). Keeping this next to
-  // pending-paste state avoids making storage depend on the later image module.
-  var uploadedTokenMap = {};
-  var uploadedTokenMapPendingTs = 0;
-
-  function clearUploadedTokenMap() {
-    uploadedTokenMap = {};
-    uploadedTokenMapPendingTs = 0;
-  }
-
-  function ensureUploadedTokenMapMatchesPending(pendingPaste) {
-    if (!pendingPaste) {
-      clearUploadedTokenMap();
-      return null;
-    }
-    if (uploadedTokenMapPendingTs && pendingPaste.ts && pendingPaste.ts > uploadedTokenMapPendingTs) {
-      clearUploadedTokenMap();
-    }
-    return pendingPaste;
-  }
-
-  function mergeUploadedTokenMap(tokenMap) {
-    if (tokenMap && typeof tokenMap === 'object') {
-      Object.keys(tokenMap).forEach(function (key) { uploadedTokenMap[key] = tokenMap[key]; });
-    }
-    uploadedTokenMapPendingTs = Date.now();
-    return Object.keys(uploadedTokenMap).length;
-  }
-
   function clonePendingPasteData(data) {
     if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
     try { return JSON.parse(JSON.stringify(data)); }
     catch (error) { return null; }
   }
 
-  function isPendingPasteFresh(data) {
-    var timestamp = Number(data && data.ts);
-    if (!Number.isFinite(timestamp) || timestamp <= 0) return false;
-    var age = Date.now() - timestamp;
-    return age >= 0 && age < PENDING_PASTE_TTL_MS;
+  function createPendingPasteId() {
+    var cryptoApi = globalThis.crypto;
+    if (!cryptoApi || typeof cryptoApi.getRandomValues !== 'function') return '';
+    var bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    return 'pending_' + Array.prototype.map.call(bytes, function (value) {
+      return value.toString(16).padStart(2, '0');
+    }).join('');
   }
 
   function createPendingPasteStorageError(op, reason) {
@@ -55,7 +27,7 @@
       var settled = false;
       var timer = setTimeout(function () {
         finish(reject, createPendingPasteStorageError(op, '请求超时'));
-      }, 2000);
+      }, 30000);
 
       function cleanup() {
         clearTimeout(timer);
@@ -103,24 +75,14 @@
   function setExtensionPendingPaste(data) {
     var cloned = clonePendingPasteData(data);
     if (!cloned) return Promise.reject(createPendingPasteStorageError('set', '缓存数据无法序列化'));
-    return requestExtensionPendingPaste('set', cloned).then(function () { return cloned; });
-  }
-
-  function deleteExtensionPendingPaste() {
-    return requestExtensionPendingPaste('delete').then(function () {
-      setDocAttr('data-feishu-pending-paste-ts', null);
+    return requestExtensionPendingPaste('set', cloned).then(function (stored) {
+      return clonePendingPasteData(stored) || cloned;
     });
   }
 
   function getPendingPaste() {
     return getExtensionPendingPaste().then(function (pendingPaste) {
-      if (!pendingPaste) return ensureUploadedTokenMapMatchesPending(null);
-      if (isPendingPasteFresh(pendingPaste)) {
-        return ensureUploadedTokenMapMatchesPending(pendingPaste);
-      }
-      return deleteExtensionPendingPaste().then(function () {
-        return ensureUploadedTokenMapMatchesPending(null);
-      });
+      return pendingPaste || null;
     });
   }
 
@@ -129,12 +91,16 @@
     if (!pendingPaste) {
       return Promise.reject(createPendingPasteStorageError('set', '待保存数据无效'));
     }
-    pendingPaste.schemaVersion = 1;
+    pendingPaste.schemaVersion = 2;
+    pendingPaste.pendingId = createPendingPasteId();
+    if (!pendingPaste.pendingId) {
+      return Promise.reject(createPendingPasteStorageError('set', '浏览器无法生成安全的缓存标识'));
+    }
     pendingPaste.ts = Date.now();
     pendingPaste.savedFromHost = location.host;
     pendingPaste.savedFromHref = location.href;
-    return setExtensionPendingPaste(pendingPaste).then(function () {
-      setDocAttr('data-feishu-pending-paste-ts', String(pendingPaste.ts));
-      return pendingPaste;
+    return setExtensionPendingPaste(pendingPaste).then(function (storedPending) {
+      setDocAttr('data-feishu-pending-paste-ts', String(storedPending.ts || pendingPaste.ts));
+      return storedPending;
     });
   }

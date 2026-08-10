@@ -1,12 +1,42 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../shared/protocol.js';
+import '../shared/image-clipboard.js';
 import './popup.css';
 
 const protocol = globalThis.FeishuExtensionProtocol;
 const FEISHU_EXTENSION_UI = protocol.MESSAGES.UI;
 const FEISHU_EXTENSION_PROGRESS = protocol.MESSAGES.PROGRESS;
 const FEISHU_EXTENSION_PROGRESS_QUERY = protocol.MESSAGES.PROGRESS_QUERY;
+const SNAPSHOT_CACHE_PREFIX = 'feishu-snapshot:';
+
+function handleFocusedClipboardWrite(message, sender, sendResponse) {
+  if (!message || message.source !== protocol.MESSAGES.CLIPBOARD_WRITE_TARGET) return false;
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  const validation = protocol.validateClipboardBridgePayload({
+    imageDataUrl: String(message.imageDataUrl || ''),
+    pasteAfterWrite: false,
+  });
+  if (!validation.ok) {
+    sendResponse({ ok: false, error: validation.error });
+    return false;
+  }
+  if (!document.hasFocus()) {
+    sendResponse({ ok: false, error: '扩展弹窗当前未获得焦点' });
+    return false;
+  }
+  globalThis.FeishuExtensionImageClipboard.writeImageDataUrl(String(message.imageDataUrl || ''))
+    .then(function () { sendResponse({ ok: true, written: true }); })
+    .catch(function (error) {
+      sendResponse({ ok: false, error: String(error && error.message || error) });
+    });
+  return true;
+}
+
+chrome.runtime.onMessage.addListener(handleFocusedClipboardWrite);
+window.addEventListener('unload', function () {
+  chrome.runtime.onMessage.removeListener(handleFocusedClipboardWrite);
+}, { once: true });
 
 const ACTIONS = [
   {
@@ -85,18 +115,24 @@ function getActiveTab() {
 
 function sendFeishuAction(action) {
   return getActiveTab().then(function (tab) {
-    if (!tab || !tab.id) throw new Error('没有找到当前标签页。');
-    if (tab.url && !isFeishuUrl(tab.url)) throw new Error('当前标签页不是飞书/Lark 文档。');
-    return chrome.tabs.sendMessage(tab.id, {
-      source: FEISHU_EXTENSION_UI,
-      action: action,
-    }).catch(function (error) {
-      const message = String(error && error.message ? error.message : error);
-      if (/Receiving end does not exist|Could not establish connection/i.test(message)) {
-        throw new Error('扩展刚安装或更新，当前页面还未加载脚本。请刷新此飞书文档页面后重试。');
-      }
-      throw error;
-    });
+    return sendFeishuActionToTab(tab, action);
+  });
+}
+
+function sendFeishuActionToTab(tab, action) {
+  const tabId = Number((tab && (tab.id || tab.tabId)) || 0);
+  const url = String((tab && tab.url) || '');
+  if (!tabId) return Promise.reject(new Error('没有找到当前标签页。'));
+  if (url && !isFeishuUrl(url)) return Promise.reject(new Error('当前标签页不是飞书/Lark 文档。'));
+  return chrome.tabs.sendMessage(tabId, {
+    source: FEISHU_EXTENSION_UI,
+    action: action,
+  }).catch(function (error) {
+    const message = String(error && error.message ? error.message : error);
+    if (/Receiving end does not exist|Could not establish connection/i.test(message)) {
+      throw new Error('扩展刚安装或更新，当前页面还未加载脚本。请刷新此飞书文档页面后重试。');
+    }
+    throw error;
   });
 }
 
@@ -105,7 +141,65 @@ function normalizeSummary(summary) {
     blockCount: Number((summary && summary.blockCount) || 0),
     equationCount: Number((summary && summary.equationCount) || 0),
     imageCount: Number((summary && summary.imageCount) || 0),
+    whiteboardCount: Number((summary && summary.whiteboardCount) || 0),
   };
+}
+
+function normalizeOfficialSummary(summary) {
+  const fields = ['blockCount', 'equationCount', 'imageCount', 'whiteboardCount'];
+  const complete = summary && fields.every(function (field) {
+    return Number.isInteger(summary[field]) && summary[field] >= 0;
+  });
+  return complete ? normalizeSummary(summary) : null;
+}
+
+function getSnapshotPageUrl(tab) {
+  const rawUrl = String((tab && tab.url) || '');
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch (_error) {
+    return rawUrl;
+  }
+}
+
+function getSnapshotCacheKey(tab) {
+  return SNAPSHOT_CACHE_PREFIX + Number((tab && (tab.tabId || tab.id)) || 0)
+    + ':' + getSnapshotPageUrl(tab);
+}
+
+function loadSnapshotCache(tab) {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.session) {
+    return Promise.resolve(null);
+  }
+  const key = getSnapshotCacheKey(tab);
+  return chrome.storage.session.get(key).then(function (items) {
+    const record = items && items[key];
+    if (!record
+      || Number(record.tabId || 0) !== Number((tab && (tab.tabId || tab.id)) || 0)
+      || String(record.url || '') !== getSnapshotPageUrl(tab)) {
+      return null;
+    }
+    return normalizeOfficialSummary(record.summary);
+  }).catch(function () {
+    return null;
+  });
+}
+
+function saveSnapshotCache(tab, summary) {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.session) {
+    return Promise.resolve();
+  }
+  const key = getSnapshotCacheKey(tab);
+  const value = {};
+  value[key] = {
+    tabId: Number((tab && (tab.tabId || tab.id)) || 0),
+    url: getSnapshotPageUrl(tab),
+    summary: summary,
+    updatedAt: Date.now(),
+  };
+  return chrome.storage.session.set(value);
 }
 
 function summarizeResult(action, result) {
@@ -116,7 +210,8 @@ function summarizeResult(action, result) {
   if (action === 'extract') {
     return '已提取 ' + summary.blockCount + ' 文档块 · '
       + summary.equationCount + ' 公式 · '
-      + summary.imageCount + ' 图片';
+      + summary.imageCount + ' 图片 · '
+      + summary.whiteboardCount + ' 画板';
   }
   if (action === 'paste') return '粘贴流程已触发。';
   if (action === 'images') return '图片面板已打开。';
@@ -138,6 +233,7 @@ function parseTab(tab) {
     host = '未识别';
   }
   return {
+    tabId: Number((tab && tab.id) || 0),
     loading: false,
     title: (tab && tab.title) || '未命名标签页',
     host: host,
@@ -189,6 +285,7 @@ function Panel() {
   const [runningAction, setRunningAction] = useState('');
   const [status, setStatus] = useState(INITIAL_STATUS);
   const [target, setTarget] = useState({
+    tabId: 0,
     loading: true,
     title: '正在读取当前标签页',
     host: '读取中',
@@ -196,21 +293,45 @@ function Panel() {
     supported: false,
     error: '',
   });
-  const [metrics, setMetrics] = useState(normalizeSummary());
+  const [overview, setOverview] = useState({ state: 'loading', summary: null, error: '' });
   const [lastResult, setLastResult] = useState(null);
   const [progress, setProgress] = useState(null);
+  const progressRequestIdRef = useRef('');
+  const localActionRef = useRef(null);
+  const nextLocalActionIdRef = useRef(0);
+  const scanEpochRef = useRef(0);
 
-  function scanMetrics() {
-    sendFeishuAction('scan').then(function (result) {
-      if (result && result.status !== 'error' && result.summary) {
-        setMetrics(normalizeSummary(result.summary));
+  function scanMetrics(tab) {
+    const epoch = scanEpochRef.current + 1;
+    scanEpochRef.current = epoch;
+    setOverview({ state: 'loading', summary: null, error: '' });
+    return sendFeishuActionToTab(tab, 'scan').then(function (result) {
+      if (scanEpochRef.current !== epoch) return;
+      const summary = result && result.status !== 'error'
+        ? normalizeOfficialSummary(result.summary)
+        : null;
+      if (!summary) {
+        throw new Error((result && result.error) || '页面快照尚未准备完成');
       }
-    }).catch(function () {
-      // 静默：页面未就绪或连接暂不可用时不打扰用户
+      setOverview({ state: 'ready', summary: summary, error: '' });
+      return saveSnapshotCache(tab, summary).catch(function () {}).then(function () {
+        return summary;
+      });
+    }).catch(function (error) {
+      if (scanEpochRef.current !== epoch) return null;
+      setOverview({
+        state: 'error',
+        summary: null,
+        error: String(error && error.message ? error.message : error),
+      });
+      throw error;
     });
   }
 
-  function refreshTarget() {
+  function loadTarget() {
+    scanEpochRef.current += 1;
+    const targetEpoch = scanEpochRef.current;
+    setOverview({ state: 'loading', summary: null, error: '' });
     setTarget(function (previous) {
       return Object.assign({}, previous, { loading: true, error: '' });
     });
@@ -218,9 +339,23 @@ function Panel() {
       if (!tab) throw new Error('没有找到当前标签页。');
       const parsed = parseTab(tab);
       setTarget(parsed);
-      if (parsed.supported) scanMetrics();
+      if (!parsed.supported) {
+        setOverview({ state: 'error', summary: null, error: '当前标签页不是飞书文档' });
+        return;
+      }
+      return loadSnapshotCache(parsed).then(function (summary) {
+        if (scanEpochRef.current !== targetEpoch) return;
+        if (summary) {
+          setOverview({ state: 'ready', summary: summary, error: '' });
+          return;
+        }
+        return scanMetrics(parsed).catch(function () {});
+      });
     }).catch(function (error) {
+      scanEpochRef.current += 1;
+      setOverview({ state: 'error', summary: null, error: '无法读取页面快照' });
       setTarget({
+        tabId: 0,
         loading: false,
         title: '当前标签页不可用',
         host: '不可用',
@@ -232,16 +367,19 @@ function Panel() {
   }
 
   function run(action) {
+    const localActionId = nextLocalActionIdRef.current + 1;
+    nextLocalActionIdRef.current = localActionId;
+    localActionRef.current = { id: localActionId, action: action };
     setRunningAction(action);
     setProgress(null);
     setStatus({ type: 'info', text: '正在执行：' + getActionTitle(action) });
     sendFeishuAction(action).then(function (result) {
-      const isError = result && result.status === 'error';
-      const notice = result && result.notice ? String(result.notice).replace(/^[⏳✅⚠️📋📷❌]+\s*/, '').trim() : '';
-      const text = isError ? (notice || summarizeResult(action, result)) : summarizeResult(action, result);
+      if (!localActionRef.current || localActionRef.current.id !== localActionId) return;
+      const isError = !result || result.status !== 'success';
+      // 失败时必须展示 error；最后一条“正在处理”toast 只是过程状态，不能覆盖根因。
+      const text = summarizeResult(action, result);
       const summary = normalizeSummary(result && result.summary);
 
-      if (!isError && result && result.summary) setMetrics(summary);
       setStatus({ type: isError ? 'error' : 'success', text: text });
       setLastResult({
         action: action,
@@ -250,6 +388,7 @@ function Panel() {
         summary: summary,
       });
     }).catch(function (error) {
+      if (!localActionRef.current || localActionRef.current.id !== localActionId) return;
       const text = String(error && error.message ? error.message : error);
       setStatus({ type: 'error', text: text });
       setLastResult({
@@ -259,35 +398,78 @@ function Panel() {
         summary: normalizeSummary(),
       });
     }).finally(function () {
+      if (!localActionRef.current || localActionRef.current.id !== localActionId) return;
+      localActionRef.current = null;
+      progressRequestIdRef.current = '';
       setRunningAction('');
       setProgress(null);
-      refreshTarget();
+    });
+  }
+
+  function refreshSnapshot() {
+    const localActionId = nextLocalActionIdRef.current + 1;
+    nextLocalActionIdRef.current = localActionId;
+    localActionRef.current = { id: localActionId, action: 'snapshot' };
+    setRunningAction('snapshot');
+    setProgress(null);
+    setStatus({ type: 'info', text: '正在执行：' + getActionTitle('snapshot') });
+    scanMetrics(target).then(function (summary) {
+      if (!summary || !localActionRef.current || localActionRef.current.id !== localActionId) return;
+      const text = summarizeResult('snapshot', { status: 'success', summary: summary });
+      setStatus({ type: 'success', text: text });
+      setLastResult({ action: 'snapshot', type: 'success', text: text, summary: summary });
+    }).catch(function (error) {
+      if (!localActionRef.current || localActionRef.current.id !== localActionId) return;
+      const text = String(error && error.message ? error.message : error);
+      setStatus({ type: 'error', text: text });
+      setLastResult({
+        action: 'snapshot',
+        type: 'error',
+        text: text,
+        summary: normalizeSummary(),
+      });
+    }).finally(function () {
+      if (!localActionRef.current || localActionRef.current.id !== localActionId) return;
+      localActionRef.current = null;
+      setRunningAction('');
+      setProgress(null);
     });
   }
 
   useEffect(function () {
-    refreshTarget();
+    loadTarget();
   }, []);
 
   useEffect(function () {
     if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.onMessage) {
       return undefined;
     }
-    function onMessage(message) {
+    function onMessage(message, sender) {
       if (!message || message.source !== FEISHU_EXTENSION_PROGRESS) return;
+      if (!sender || !sender.tab || sender.tab.id !== target.tabId) return;
+      const requestId = String(message.requestId || '');
+      if (!requestId) return;
+      if (message.state === 'start') progressRequestIdRef.current = requestId;
+      else if (progressRequestIdRef.current && progressRequestIdRef.current !== requestId) return;
+      else if (!progressRequestIdRef.current) progressRequestIdRef.current = requestId;
 
       // 动作完成：清理进度与运行态。若该动作是在别处（关闭 popup 期间）跑完的，
       // 这里补一条完成提示。
       if (message.state === 'done') {
+        progressRequestIdRef.current = '';
         setProgress(null);
+        const localAction = localActionRef.current;
+        if (localAction && localAction.action === message.action) return;
         setRunningAction(function (current) {
           if (current && current === message.action) {
             const ok = String(message.status || 'success') !== 'error';
+            const detail = String(ok ? (message.notice || '') : (message.error || message.notice || '')).trim();
             setStatus({
               type: ok ? 'success' : 'error',
-              text: ok ? getActionTitle(message.action) + '已完成。' : getActionTitle(message.action) + '执行失败。',
+              text: detail || (ok
+                ? getActionTitle(message.action) + '已完成。'
+                : getActionTitle(message.action) + '执行失败。'),
             });
-            refreshTarget();
           }
           return current === message.action ? '' : current;
         });
@@ -299,7 +481,12 @@ function Panel() {
       }
       const total = Number(message.total || 0);
       const done = Number(message.done || 0);
-      if (message.state === 'start' || total <= 0) return;
+      if (message.state === 'start') return;
+      if (total <= 0) {
+        const label = String(message.label || '').trim();
+        if (label) setStatus({ type: 'info', text: label + '…' });
+        return;
+      }
       const percent = total > 0 ? (done / total) * 100 : 0;
       setProgress({
         phase: String(message.phase || ''),
@@ -311,7 +498,7 @@ function Panel() {
     }
     chrome.runtime.onMessage.addListener(onMessage);
     return function () { chrome.runtime.onMessage.removeListener(onMessage); };
-  }, []);
+  }, [target.tabId]);
 
   // popup 重开时，从后台恢复该标签页正在进行的进度。
   useEffect(function () {
@@ -327,7 +514,12 @@ function Panel() {
         const total = Number(record.total || 0);
         const done = Number(record.done || 0);
         setRunningAction(record.action);
-        setStatus({ type: 'info', text: '正在执行：' + getActionTitle(record.action) });
+        progressRequestIdRef.current = String(record.requestId || '');
+        const label = String(record.label || '').trim();
+        setStatus({
+          type: 'info',
+          text: total <= 0 && label ? label + '…' : '正在执行：' + getActionTitle(record.action),
+        });
         if (total <= 0) return;
         setProgress({
           phase: String(record.phase || ''),
@@ -340,14 +532,21 @@ function Panel() {
     }).catch(function () {});
   }, []);
 
-  const actionDisabled = Boolean(runningAction) || (!target.supported && !target.loading);
-  const connectionVariant = target.supported ? 'success' : target.loading ? 'processing' : 'warning';
-  const connectionText = target.supported ? '可操作' : target.loading ? '检测中' : '不支持';
-  const metricItems = [
-    { key: 'blocks', label: '文档块', value: metrics.blockCount },
-    { key: 'equations', label: '公式', value: metrics.equationCount },
-    { key: 'images', label: '图片', value: metrics.imageCount },
-  ];
+  const overviewLoading = target.loading || overview.state === 'loading';
+  const actionDisabled = Boolean(runningAction) || overviewLoading
+    || (!target.supported && !target.loading);
+  const connectionVariant = !target.supported && !target.loading
+    ? 'warning'
+    : overviewLoading ? 'processing' : overview.state === 'ready' ? 'success' : 'warning';
+  const connectionText = !target.supported && !target.loading
+    ? '不支持'
+    : overviewLoading ? '快照中' : overview.state === 'ready' ? '可操作' : '待重试';
+  const metricItems = overview.summary ? [
+    { key: 'blocks', label: '文档块', value: overview.summary.blockCount },
+    { key: 'equations', label: '公式', value: overview.summary.equationCount },
+    { key: 'images', label: '图片', value: overview.summary.imageCount },
+    { key: 'whiteboards', label: '画板', value: overview.summary.whiteboardCount },
+  ] : [];
 
   return (
     <main className="popup">
@@ -372,7 +571,16 @@ function Panel() {
           </span>
         </div>
         <div className="doc-card__stats" role="group" aria-label="最近一次提取概览">
-          {metricItems.map(function (item) {
+          {overviewLoading ? (
+            <div className="doc-card__stats-state doc-card__stats-state--loading" role="status">
+              <span className="doc-card__stats-spinner" aria-hidden="true" />
+              快照提取中…
+            </div>
+          ) : overview.state === 'error' ? (
+            <div className="doc-card__stats-state" role="status" title={overview.error}>
+              快照提取失败，请稍后重试
+            </div>
+          ) : metricItems.map(function (item) {
             return (
               <div className="statistic" key={item.key}>
                 <span className="statistic__value">{item.value}</span>
@@ -400,8 +608,11 @@ function Panel() {
                 className="ant-btn ant-btn--default"
                 key={item.key}
                 type="button"
-                disabled={actionDisabled && !isRunning}
-                onClick={function () { run(item.key); }}
+                disabled={actionDisabled}
+                onClick={function () {
+                  if (item.key === 'snapshot') refreshSnapshot();
+                  else run(item.key);
+                }}
                 title={item.description}
               >
                 <span className="ant-btn__icon">{item.icon}</span>

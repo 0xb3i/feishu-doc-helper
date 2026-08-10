@@ -11,7 +11,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const MANIFEST = JSON.parse(fs.readFileSync(path.join(ROOT, 'dist/feishu-extension/manifest.json'), 'utf8'));
-const EXTENSION_NAME = MANIFEST.name || '飞书文档助手';
+const EXTENSION_ID = require('../extension/extension-identity.json').extensionId;
 const PORT = Number(process.env.FEISHU_EXTENSION_CDP_PORT || process.env.CDP_PORT || 9223);
 const HOST = process.env.FEISHU_EXTENSION_CDP_HOST || '127.0.0.1';
 
@@ -83,7 +83,7 @@ function reloadFromExtensionTarget(target) {
 
 function reloadFromExtensionsPage(target) {
   const expression = `(() => {
-    const wantedName = ${JSON.stringify(EXTENSION_NAME)};
+    const wantedId = ${JSON.stringify(EXTENSION_ID)};
     function walk(node) {
       if (!node) return [];
       const out = [];
@@ -95,7 +95,7 @@ function reloadFromExtensionsPage(target) {
     }
     const nodes = walk(document);
     const item = nodes.find((el) => el.tagName && el.tagName.toLowerCase() === 'extensions-item'
-      && String(el.shadowRoot && el.shadowRoot.textContent || el.textContent || '').includes(wantedName));
+      && String(el.id || el.getAttribute && el.getAttribute('id') || '') === wantedId);
     if (!item || !item.shadowRoot) return { ok: false, reason: 'extension item not found' };
     const reload = item.shadowRoot.querySelector('#dev-reload-button, cr-icon-button[title*="重新加载"], cr-icon-button[aria-label*="重新加载"], cr-icon-button[title*="Reload"], cr-icon-button[aria-label*="Reload"]');
     if (!reload) return { ok: false, reason: 'reload button not found' };
@@ -116,10 +116,7 @@ async function main() {
       && /^chrome-extension:\/\//.test(String(target.url || ''));
   });
   for (const target of extensionTargets) {
-    try {
-      const manifestName = await cdpEval(target, 'chrome.runtime.getManifest().name');
-      if (String(manifestName || '') === EXTENSION_NAME) return reloadFromExtensionTarget(target);
-    } catch (error) {}
+    if (extensionIdFromTarget(target) === EXTENSION_ID) return reloadFromExtensionTarget(target);
   }
 
   const extensionsPage = targets.find(function (target) {

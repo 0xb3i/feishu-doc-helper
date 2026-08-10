@@ -7,10 +7,12 @@ var SOURCE = protocol.MESSAGES.UI;
 var PROGRESS_MESSAGE = protocol.MESSAGES.PROGRESS;
 var PROGRESS_QUERY = protocol.MESSAGES.PROGRESS_QUERY;
 var IMAGE_FETCH = protocol.MESSAGES.IMAGE_FETCH;
+var CLIPBOARD_WRITE = protocol.MESSAGES.CLIPBOARD_WRITE;
 var PENDING_PASTE = protocol.MESSAGES.PENDING_PASTE;
 var STORAGE_PREFIX = 'feishu-progress:';
 var PENDING_PASTE_KEY = 'feishu-pending-paste';
 var PENDING_PASTE_CLEANUP_ALARM = 'feishu-pending-paste-cleanup';
+var pendingWriteQueue = Promise.resolve();
 
 var MENU_ITEMS = [
   { id: 'extract', title: '提取当前文档' },
@@ -32,6 +34,15 @@ function sendActionToActiveTab(action) {
     var tab = tabs && tabs[0];
     if (tab && protocol.isSupportedDocumentUrl(tab.url)) sendActionToTab(tab.id, action);
   });
+}
+
+function describeNativeMessagingError(error) {
+  var message = String(error && error.message || error || '未知错误');
+  if (/native messaging host not found|specified native messaging host not found/i.test(message)) {
+    return '未找到画板迁移 Host。请先运行 npm run install:native-host，'
+      + '然后完全退出并重新打开 Chrome / Chrome Canary 后重试。';
+  }
+  return '无法连接画板迁移 Host：' + message;
 }
 
 // ── Progress persistence ─────────────────────────────────────────────────────
@@ -78,9 +89,7 @@ function getLocalArea() {
 }
 
 function isPendingPasteExpired(value) {
-  var timestamp = Number(value && value.ts);
-  return !Number.isFinite(timestamp) || timestamp <= 0
-    || Date.now() - timestamp >= protocol.LIMITS.PENDING_TTL_MS;
+  return !protocol.isPendingFresh(value, Date.now());
 }
 
 function schedulePendingPasteCleanup(value) {
@@ -114,6 +123,53 @@ function cleanupExpiredPendingPaste() {
 
 function sendError(sendResponse, message) {
   sendResponse({ ok: false, error: String(message || 'request rejected') });
+}
+
+function createTrustedPendingId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return 'pending_' + globalThis.crypto.randomUUID().replace(/-/g, '');
+  }
+  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+    var bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return 'pending_' + Array.prototype.map.call(bytes, function (value) {
+      return value.toString(16).padStart(2, '0');
+    }).join('');
+  }
+  return '';
+}
+
+function normalizePendingForStorage(value, senderInfo) {
+  var normalized;
+  try { normalized = JSON.parse(JSON.stringify(value)); }
+  catch (error) { return null; }
+  var pendingId = createTrustedPendingId();
+  if (!pendingId) return null;
+  var senderUrl;
+  try { senderUrl = new URL(senderInfo.url); }
+  catch (error) { return null; }
+  normalized.schemaVersion = 2;
+  normalized.pendingId = pendingId;
+  normalized.ts = Date.now();
+  normalized.savedFromHost = senderUrl.host;
+  normalized.savedFromHref = senderUrl.href;
+  return normalized;
+}
+
+function queuePendingPasteWrite(area, value) {
+  var operation = pendingWriteQueue.catch(function () {}).then(function () {
+    return new Promise(function (resolve, reject) {
+      var data = {};
+      data[PENDING_PASTE_KEY] = value;
+      area.set(data, function () {
+        var error = chrome.runtime.lastError;
+        if (error) reject(new Error(error.message));
+        else resolve();
+      });
+    });
+  });
+  pendingWriteQueue = operation;
+  return operation;
 }
 
 function getTrustedDocumentSender(sender) {
@@ -157,7 +213,9 @@ function validateImageResponse(response, documentUrl) {
   if (!finalUrl.ok) throw new Error('image redirect rejected: ' + finalUrl.error);
 
   var mime = protocol.normalizeImageMime(response.headers.get('content-type'));
-  if (!protocol.isAllowedImageMime(mime)) throw new Error('response is not an approved image MIME');
+  if (!protocol.isAllowedImageMime(mime) && mime !== 'application/octet-stream') {
+    throw new Error('response is not an approved image MIME');
+  }
 
   var contentLengthHeader = response.headers.get('content-length');
   if (contentLengthHeader) {
@@ -171,14 +229,15 @@ function validateImageResponse(response, documentUrl) {
 }
 
 function readValidatedImageResponse(validated) {
-  return validated.response.blob().then(function (blob) {
-    if (!blob || blob.size > protocol.LIMITS.MAX_IMAGE_BYTES) {
+  return validated.response.arrayBuffer().then(function (buffer) {
+    if (!buffer || buffer.byteLength > protocol.LIMITS.MAX_IMAGE_BYTES) {
       throw new Error('image response exceeds size limit');
     }
-    if (blob.type && !protocol.isAllowedImageMime(blob.type)) {
-      throw new Error('decoded response is not an approved image MIME');
+    var detectedMime = protocol.detectImageMime(new Uint8Array(buffer));
+    if (!detectedMime || !protocol.isAllowedImageMime(detectedMime)) {
+      throw new Error('response bytes are not an approved image format');
     }
-    return readBlobAsDataUrl(blob);
+    return readBlobAsDataUrl(new Blob([buffer], { type: detectedMime }));
   });
 }
 
@@ -216,8 +275,72 @@ function fetchImageDataUrl(initialValidation, documentUrl) {
   });
 }
 
+function writeImageClipboardFocusedContext(imageDataUrl) {
+  return chrome.runtime.sendMessage({
+    source: protocol.MESSAGES.CLIPBOARD_WRITE_TARGET,
+    imageDataUrl: imageDataUrl,
+  }).then(function (response) {
+    if (!response || !response.ok || !response.written) {
+      throw new Error(String(response && response.error || '扩展弹窗未接管图片剪贴板'));
+    }
+    return response;
+  });
+}
+
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (!message) return false;
+
+  if (message.source === protocol.NATIVE_MESSAGING.REQUEST_TYPE) {
+    var nativeSender = getTrustedDocumentSender(sender);
+    var nativeInput = message.request || {};
+    if (!nativeSender) { sendError(sendResponse, 'untrusted document sender'); return false; }
+    if (!protocol.validateRequestId(message.actionRequestId)) {
+      sendError(sendResponse, 'invalid action request');
+      return false;
+    }
+    var nativeRequest = {
+      type: protocol.NATIVE_MESSAGING.REQUEST_TYPE,
+      host: protocol.NATIVE_MESSAGING.HOST_NAME,
+      op: String(nativeInput.op || ''),
+      action: String(nativeInput.action || ''),
+    };
+    if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.INSPECT
+      || nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.EXPORT) {
+      nativeRequest.sourceUrl = nativeSender.url;
+    }
+    if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT
+      || nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.APPLY) {
+      nativeRequest.bundleId = String(nativeInput.bundleId || '');
+      nativeRequest.targetUrl = nativeSender.url;
+    }
+    if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.RECONCILE_IMAGES) {
+      nativeRequest.targetUrl = nativeSender.url;
+      nativeRequest.images = Array.isArray(nativeInput.images) ? nativeInput.images : [];
+    }
+    if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.DISCARD) {
+      nativeRequest.bundleId = String(nativeInput.bundleId || '');
+    }
+    var nativeValidation = protocol.validateNativeMessagingRequest(nativeRequest);
+    if (!nativeValidation.ok) { sendError(sendResponse, nativeValidation.error); return false; }
+    try {
+      chrome.runtime.sendNativeMessage(protocol.NATIVE_MESSAGING.HOST_NAME, nativeRequest, function (response) {
+        var nativeError = chrome.runtime.lastError;
+        if (nativeError) {
+          sendError(sendResponse, describeNativeMessagingError(nativeError));
+          return;
+        }
+        if (!response || typeof response !== 'object' || typeof response.ok !== 'boolean') {
+          sendError(sendResponse, '画板迁移 Host 返回了无效响应');
+          return;
+        }
+        sendResponse(response);
+      });
+    } catch (error) {
+      sendError(sendResponse, String(error && error.message || error));
+      return false;
+    }
+    return true;
+  }
 
   if (message.source === PENDING_PASTE) {
     var pendingSender = getTrustedDocumentSender(sender);
@@ -260,12 +383,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     if (pendingOp === protocol.PENDING_OPS.SET) {
       var pendingValidation = protocol.validatePendingPayload(message.value);
       if (!pendingValidation.ok) { sendError(sendResponse, pendingValidation.error); return false; }
-      var data = {};
-      data[PENDING_PASTE_KEY] = message.value;
-      localArea.set(data, function () {
-        var err = chrome.runtime.lastError;
-        if (!err) schedulePendingPasteCleanup(message.value);
-        sendResponse(err ? { ok: false, error: err.message } : { ok: true });
+      var normalizedPending = normalizePendingForStorage(message.value, pendingSender);
+      if (!normalizedPending) { sendError(sendResponse, 'failed to create trusted pending envelope'); return false; }
+      var normalizedValidation = protocol.validatePendingPayload(normalizedPending);
+      if (!normalizedValidation.ok) { sendError(sendResponse, normalizedValidation.error); return false; }
+      queuePendingPasteWrite(localArea, normalizedPending).then(function () {
+        schedulePendingPasteCleanup(normalizedPending);
+        sendResponse({ ok: true, value: normalizedPending });
+      }).catch(function (error) {
+        sendError(sendResponse, error.message);
       });
       return true;
     }
@@ -279,6 +405,24 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     }
     sendError(sendResponse, 'unsupported operation');
     return false;
+  }
+
+  if (message.source === CLIPBOARD_WRITE) {
+    var clipboardSender = getTrustedDocumentSender(sender);
+    if (!clipboardSender) { sendError(sendResponse, 'untrusted document sender'); return false; }
+    if (!protocol.validateRequestId(message.actionRequestId)) {
+      sendError(sendResponse, 'invalid action request');
+      return false;
+    }
+    var clipboardValidation = protocol.validateClipboardBridgePayload({
+      imageDataUrl: String(message.imageDataUrl || ''),
+      pasteAfterWrite: false,
+    });
+    if (!clipboardValidation.ok) { sendError(sendResponse, clipboardValidation.error); return false; }
+    writeImageClipboardFocusedContext(String(message.imageDataUrl || ''))
+      .then(function () { sendResponse({ ok: true, written: true }); })
+      .catch(function (error) { sendError(sendResponse, error && error.message || error); });
+    return true;
   }
 
   // 后台跨域抓取图片字节（拥有 host_permissions，不受页面 CORS 限制），
@@ -341,8 +485,11 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   return false;
 });
 
-// 标签页关闭 / 导航离开时清理残留进度。
+// 标签页关闭、刷新或导航离开时清理残留进度。
 chrome.tabs.onRemoved.addListener(function (tabId) { clearProgress(tabId); });
+chrome.tabs.onUpdated.addListener(function (tabId, changeInfo) {
+  if (changeInfo && (changeInfo.status === 'loading' || changeInfo.url)) clearProgress(tabId);
+});
 
 chrome.alarms.onAlarm.addListener(function (alarm) {
   if (alarm && alarm.name === PENDING_PASTE_CLEANUP_ALARM) cleanupExpiredPendingPaste();

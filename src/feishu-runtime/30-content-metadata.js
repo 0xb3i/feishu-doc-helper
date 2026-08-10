@@ -86,7 +86,9 @@
       record.recordIds = record.recordIds.slice(1);
       delete record.recordMap[firstRecordId];
       if (record.payloadMap) delete record.payloadMap[firstRecordId];
-      record.blockIds = record.recordIds.map(function (_recordId, index) { return index + 1; });
+      // docx/record 的块选择编号从 2 开始；必须与 selection.id 保持一致。
+      // 从 1 重编号会让飞书把编号 1 解释成标题后残留的空正文块。
+      record.blockIds = record.recordIds.map(function (_recordId, index) { return index + 2; });
       record.selection = record.recordIds.map(function (recordId, index) {
         return { id: index + 2, type: 'block', recordId: recordId };
       });

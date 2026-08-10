@@ -16,7 +16,10 @@
   // 当前进行中的动作 requestId / 名称，用于把页面进度事件关联到本次操作。
   var activeRequestId = '';
   var activeAction = '';
+  var activeWhiteboardBundleId = '';
+  var nativeRequestInFlight = false;
   var lastImageContextGesture = null;
+  var clipboardTransferInFlight = false;
 
   function broadcastProgress(payload) {
     try {
@@ -169,13 +172,17 @@
     if (!protocol.validateRequestId(requestId)) return;
     if (!validation.ok) { reply({ ok: false, error: validation.error }); return; }
 
+    var actionAllowsBatchFetch = Boolean(activeRequestId)
+      && activeAction === protocol.ACTIONS.EXTRACT;
     var gesture = lastImageContextGesture;
-    lastImageContextGesture = null;
-    if (!gesture || Date.now() - gesture.createdAt > protocol.LIMITS.IMAGE_GESTURE_TTL_MS
-      || gesture.candidates.indexOf(validation.url) === -1) {
+    var gestureAllowsFetch = Boolean(gesture)
+      && Date.now() - gesture.createdAt <= protocol.LIMITS.IMAGE_GESTURE_TTL_MS
+      && gesture.candidates.indexOf(validation.url) !== -1;
+    if (!actionAllowsBatchFetch && !gestureAllowsFetch) {
       reply({ ok: false, error: 'image fetch requires a recent trusted context-menu gesture' });
       return;
     }
+    if (gestureAllowsFetch) lastImageContextGesture = null;
     try {
       chrome.runtime.sendMessage({ source: IMAGE_FETCH_MESSAGE, url: validation.url }, function (response) {
         if (chrome.runtime.lastError) {
@@ -222,10 +229,187 @@
           reply({ ok: false, error: chrome.runtime.lastError.message });
           return;
         }
+        if (response && response.ok && op === protocol.PENDING_OPS.GET) {
+          var transfer = response.value && response.value.whiteboardTransfer;
+          if (transfer && protocol.validateWhiteboardTransfer(transfer).ok) {
+            activeWhiteboardBundleId = String(transfer.bundleId);
+          }
+        }
         reply(response || { ok: false, error: 'no response' });
       });
     } catch (err) {
       reply({ ok: false, error: String(err && err.message || err) });
+    }
+  }, true);
+
+  var CLIPBOARD_TRANSFER_EVENT = protocol.DOM_EVENTS.CLIPBOARD_TRANSFER;
+  var CLIPBOARD_TRANSFER_RESULT_EVENT = protocol.DOM_EVENTS.CLIPBOARD_TRANSFER_RESULT;
+
+  function writeImageClipboardFocusedContext(imageDataUrl) {
+    var pageClipboard = globalThis.FeishuExtensionImageClipboard;
+    if (document.hasFocus() && pageClipboard) {
+      return pageClipboard.writeImageDataUrl(imageDataUrl).then(function () {
+        return { ok: true, written: true };
+      });
+    }
+    return chrome.runtime.sendMessage({
+      source: protocol.MESSAGES.CLIPBOARD_WRITE,
+      actionRequestId: activeRequestId,
+      imageDataUrl: imageDataUrl,
+    }).then(function (response) {
+      if (!response || !response.ok || !response.written) {
+        throw new Error(String(response && response.error || '没有可用的聚焦剪贴板上下文'));
+      }
+      return response;
+    });
+  }
+
+  document.addEventListener(CLIPBOARD_TRANSFER_EVENT, function (event) {
+    var detail = (event && event.detail) || {};
+    var requestId = String(detail.requestId || '');
+    var payload = detail.payload;
+    function reply(result) {
+      document.dispatchEvent(new CustomEvent(CLIPBOARD_TRANSFER_RESULT_EVENT, {
+        detail: Object.assign({ requestId: requestId }, result),
+      }));
+    }
+    if (!protocol.validateRequestId(requestId)) return;
+    if (!activeRequestId || (activeAction !== protocol.ACTIONS.PASTE
+      && activeAction !== protocol.ACTIONS.PREPARE_NATIVE_PASTE)) {
+      reply({ ok: false, error: 'clipboard transfer is outside an active paste action' });
+      return;
+    }
+    var validation = protocol.validateClipboardBridgePayload(payload);
+    if (!validation.ok) { reply({ ok: false, error: validation.error }); return; }
+    if (clipboardTransferInFlight) {
+      reply({ ok: false, error: 'another clipboard transfer is still running' });
+      return;
+    }
+
+    clipboardTransferInFlight = true;
+    if (payload.imageDataUrl) {
+      writeImageClipboardFocusedContext(payload.imageDataUrl).then(function () {
+        var pasted = payload.pasteAfterWrite && document.execCommand('paste') === true;
+        clipboardTransferInFlight = false;
+        reply({ ok: true, written: true, pasted: pasted });
+      }).catch(function (error) {
+        clipboardTransferInFlight = false;
+        reply({ ok: false, error: String(error && error.message || error) });
+      });
+      return;
+    }
+    var handled = false;
+    function onCopy(copyEvent) {
+      handled = true;
+      copyEvent.preventDefault();
+      copyEvent.stopImmediatePropagation();
+      if (!copyEvent.clipboardData) return;
+      if (payload.text) copyEvent.clipboardData.setData('text/plain', payload.text);
+      if (payload.html) copyEvent.clipboardData.setData('text/html', payload.html);
+      if (payload.docxRecord) copyEvent.clipboardData.setData('docx/record', payload.docxRecord);
+    }
+    document.addEventListener('copy', onCopy, true);
+    try {
+      var copied = document.execCommand('copy');
+      document.removeEventListener('copy', onCopy, true);
+      if (!handled && !copied) throw new Error('extension copy command was rejected');
+      var pasted = false;
+      if (payload.pasteAfterWrite) pasted = document.execCommand('paste') === true;
+      clipboardTransferInFlight = false;
+      reply({ ok: true, written: true, pasted: pasted });
+    } catch (error) {
+      document.removeEventListener('copy', onCopy, true);
+      clipboardTransferInFlight = false;
+      reply({ ok: false, error: String(error && error.message || error) });
+    }
+  }, true);
+
+  var WHITEBOARD_NATIVE_EVENT = protocol.DOM_EVENTS.WHITEBOARD_NATIVE;
+  var WHITEBOARD_NATIVE_RESULT_EVENT = protocol.DOM_EVENTS.WHITEBOARD_NATIVE_RESULT;
+
+  document.addEventListener(WHITEBOARD_NATIVE_EVENT, function (event) {
+    var detail = (event && event.detail) || {};
+    var requestId = String(detail.requestId || '');
+    var op = String(detail.op || '');
+    function reply(result) {
+      document.dispatchEvent(new CustomEvent(WHITEBOARD_NATIVE_RESULT_EVENT, {
+        detail: Object.assign({ requestId: requestId }, result),
+      }));
+    }
+    if (!protocol.validateRequestId(requestId)) return;
+    if (!activeRequestId) {
+      reply({ ok: false, error: 'whiteboard native operation is outside an active extension action' });
+      return;
+    }
+    if (nativeRequestInFlight) {
+      reply({ ok: false, error: 'another whiteboard native operation is still running' });
+      return;
+    }
+
+    var request = {
+      type: protocol.NATIVE_MESSAGING.REQUEST_TYPE,
+      host: protocol.NATIVE_MESSAGING.HOST_NAME,
+      op: op,
+      action: activeAction,
+    };
+    if (op === protocol.NATIVE_MESSAGING.OPS.INSPECT
+      || op === protocol.NATIVE_MESSAGING.OPS.EXPORT) request.sourceUrl = location.href;
+    if (op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT || op === protocol.NATIVE_MESSAGING.OPS.APPLY) {
+      request.bundleId = String(detail.bundleId || '');
+      request.targetUrl = location.href;
+    }
+    if (op === protocol.NATIVE_MESSAGING.OPS.RECONCILE_IMAGES) {
+      request.targetUrl = location.href;
+      request.images = Array.isArray(detail.images) ? detail.images : [];
+    }
+    if (op === protocol.NATIVE_MESSAGING.OPS.DISCARD) {
+      request.bundleId = String(detail.bundleId || '');
+    }
+    var validation = protocol.validateNativeMessagingRequest(request);
+    if (!validation.ok) {
+      var diagnostic = op === protocol.NATIVE_MESSAGING.OPS.RECONCILE_IMAGES
+        ? ' [action=' + String(request.action) + ', target=' + Boolean(request.targetUrl)
+          + ', bundle=' + Object.prototype.hasOwnProperty.call(request, 'bundleId')
+          + ', source=' + Object.prototype.hasOwnProperty.call(request, 'sourceUrl')
+          + ', images=' + (Array.isArray(request.images) ? request.images.length : -1) + ']'
+        : '';
+      reply({ ok: false, error: validation.error + diagnostic });
+      return;
+    }
+    if ((op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT || op === protocol.NATIVE_MESSAGING.OPS.APPLY)
+      && (!activeWhiteboardBundleId || request.bundleId !== activeWhiteboardBundleId)) {
+      reply({ ok: false, error: 'whiteboard bundle does not match the active pending paste' });
+      return;
+    }
+    if (op === protocol.NATIVE_MESSAGING.OPS.DISCARD
+      && (!activeWhiteboardBundleId || request.bundleId !== activeWhiteboardBundleId)) {
+      reply({ ok: false, error: 'whiteboard discard does not match the active extract' });
+      return;
+    }
+
+    try {
+      nativeRequestInFlight = true;
+      chrome.runtime.sendMessage({
+        source: protocol.NATIVE_MESSAGING.REQUEST_TYPE,
+        actionRequestId: activeRequestId,
+        request: request,
+      }, function (response) {
+        nativeRequestInFlight = false;
+        if (chrome.runtime.lastError) {
+          reply({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        if (response && response.ok && op === protocol.NATIVE_MESSAGING.OPS.EXPORT) {
+          var exportedTransfer = response.data && response.data.whiteboardTransfer;
+          if (exportedTransfer && protocol.validateWhiteboardTransfer(exportedTransfer).ok) {
+            activeWhiteboardBundleId = String(exportedTransfer.bundleId);
+          }
+        }
+        reply(response || { ok: false, error: 'Native Host 未返回响应' });
+      });
+    } catch (error) {
+      nativeRequestInFlight = false;
+      reply({ ok: false, error: String(error && error.message || error) });
     }
   }, true);
 
@@ -267,6 +451,8 @@
       }
       activeRequestId = requestId;
       activeAction = action;
+      activeWhiteboardBundleId = '';
+      nativeRequestInFlight = false;
 
       // 通知后台：新动作开始（scan 是静默轮询，不广播生命周期）。
       if (action && action !== 'scan') {
@@ -277,6 +463,8 @@
         if (activeRequestId === requestId) {
           activeRequestId = '';
           activeAction = '';
+          activeWhiteboardBundleId = '';
+          nativeRequestInFlight = false;
         }
         if (action && action !== 'scan') {
           broadcastProgress({
@@ -284,15 +472,19 @@
             requestId: requestId,
             action: action,
             status: String((result && result.status) || 'success'),
+            error: protocol.normalizeProgressLabel(result && result.error),
+            notice: protocol.normalizeProgressLabel(result && result.notice),
           });
         }
         resolve(result);
       }
 
+      var actionTimeoutMs = action === protocol.ACTIONS.EXTRACT || action === protocol.ACTIONS.PASTE
+        || action === protocol.ACTIONS.PREPARE_NATIVE_PASTE ? 10 * 60 * 1000 : 45000;
       var timer = setTimeout(function () {
         document.removeEventListener(UI_RESULT_EVENT, onResult, true);
         finish({ status: 'error', error: '页面脚本响应超时，请确认当前标签页是飞书文档。' });
-      }, 45000);
+      }, actionTimeoutMs);
 
       function onResult(event) {
         var detail = (event && event.detail) || {};

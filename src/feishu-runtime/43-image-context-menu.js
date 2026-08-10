@@ -182,15 +182,7 @@
   registerEventListener(window, 'keydown', function (e) {
     if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
     var k = e.key.toLowerCase();
-    if (k === 'd') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      duplicateDocumentForAutomation().catch(function () {});
-    } else if (k === 'p') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      pasteIntoDoc().catch(function () {});
-    } else if (k === 'i') {
+    if (k === 'i') {
       e.preventDefault();
       e.stopImmediatePropagation();
       var images = extractImages();

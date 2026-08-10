@@ -26,8 +26,8 @@
   // ── Constants ──────────────────────────────────────────────────────────────
 
   var SCRIPT_VERSION = '__FEISHU_HELPER_VERSION__';
-  var AUTOMATION_REQUEST_EVENT = 'feishu-helper:automation-request';
-  var AUTOMATION_RESULT_EVENT = 'feishu-helper:automation-result';
+  // 保留页面原生 fetch 的绑定引用供同源文档 API 使用；不改写 window.fetch。
+  var pageFetch = window.fetch.bind(window);
   var CONTENT_ROOT_SELECTOR = '[data-content-editable-root="true"]';
   var HIDDEN_PASTE_TEXTAREA_SELECTOR = 'textarea.docx-selection-hidden-textarea';
   var EDITABLE_SELECTOR = [
@@ -38,8 +38,9 @@
     '[role="textbox"]',
   ].join(', ');
   var MAX_BLOCK_DEPTH = 12;
-  var FEISHU_WHITEBOARD_CLONE_RE = /\/space\/api\/whiteboard\/block\/clone(?:[/?#]|$)/i;
-  var FEISHU_CAPTURED_REQUEST_LIMIT = 10;
+  // 普通内容仍沿用较小的提取深度；画板迁移必须覆盖官方 API 返回的深层槽位。
+  // 64 与 Native Host 对画板节点的防御性深度上限一致，避免无界递归。
+  var WHITEBOARD_TRANSFER_MAX_BLOCK_DEPTH = 64;
   var IMAGE_PLACEHOLDER_SRC = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
   var EXTENSION_PENDING_PASTE_EVENT = 'feishu-helper:pending-paste';
   var EXTENSION_PENDING_PASTE_RESULT_EVENT = 'feishu-helper:pending-paste-result';
@@ -94,88 +95,8 @@
   }
 
   function stringifyError(error) {
-    return String(error && error.stack ? error.stack : (error && error.message ? error.message : error));
+    return String(error && error.message ? error.message : error);
   }
 
   console.info('[Feishu Helper v' + SCRIPT_VERSION + '] loaded on', location.href);
   setDocAttr('data-feishu-helper-active', SCRIPT_VERSION);
-
-  // ── Whiteboard clone capture (runner uses this for failure diagnostics) ────
-
-  var capturedWhiteboardClones = [];
-  var originalFetch = window.fetch;
-  var whiteboardFetchWrapper = null;
-
-  function isWhiteboardCloneRequest(url, method) {
-    return FEISHU_WHITEBOARD_CLONE_RE.test(String(url || '')) && /post/i.test(String(method || ''));
-  }
-
-  function captureRequestHeaders(headers) {
-    var out = [];
-    if (!headers) return out;
-    try {
-      if (headers instanceof Headers) {
-        headers.forEach(function (_value, key) { out.push(String(key).toLowerCase()); });
-      } else if (typeof headers === 'object') {
-        Object.keys(headers).forEach(function (key) { out.push(String(key).toLowerCase()); });
-      }
-    } catch (error) {}
-    return Array.from(new Set(out)).sort();
-  }
-
-  function summarizeWhiteboardCapture(capture, patch) {
-    if (!capture || !patch) return;
-    Object.keys(patch).forEach(function (key) { capture[key] = patch[key]; });
-    setDocJsonAttr('data-feishu-captured-whiteboard-clones',
-      capturedWhiteboardClones.slice(-FEISHU_CAPTURED_REQUEST_LIMIT));
-  }
-
-  function recordWhiteboardClone(initial) {
-    capturedWhiteboardClones.push(initial);
-    setDocJsonAttr('data-feishu-captured-whiteboard-clones',
-      capturedWhiteboardClones.slice(-FEISHU_CAPTURED_REQUEST_LIMIT));
-    return initial;
-  }
-
-  function installWhiteboardFetchCapture() {
-    if (whiteboardFetchWrapper) return false;
-    whiteboardFetchWrapper = function (input, init) {
-      var url = typeof input === 'string' ? input : (input instanceof Request ? input.url : String(input || ''));
-      var method = (init && init.method) || (input instanceof Request ? input.method : 'GET');
-      var capture = null;
-      if (isWhiteboardCloneRequest(url, method)) {
-        capture = recordWhiteboardClone({
-          url: url,
-          method: method,
-          timestamp: Date.now(),
-          headerNames: captureRequestHeaders(init && init.headers),
-          diagnosticType: 'whiteboardClone',
-        });
-      }
-      var result = originalFetch.apply(this, arguments);
-      if (!capture || !result || typeof result.then !== 'function') return result;
-      return result.then(function (response) {
-        summarizeWhiteboardCapture(capture, {
-          ok: !!(response && response.ok),
-          status: Number((response && response.status) || 0),
-          statusText: String((response && response.statusText) || ''),
-          responseCapturedAt: Date.now(),
-        });
-        return response;
-      }).catch(function (error) {
-        summarizeWhiteboardCapture(capture, {
-          fetchError: stringifyError(error),
-          responseCapturedAt: Date.now(),
-        });
-        throw error;
-      });
-    };
-    window.fetch = whiteboardFetchWrapper;
-    return true;
-  }
-
-  registerEventListener(document, 'feishu-install-whiteboard-network-debug', installWhiteboardFetchCapture, true);
-  registerDisposer(function () {
-    if (whiteboardFetchWrapper && window.fetch === whiteboardFetchWrapper) window.fetch = originalFetch;
-    whiteboardFetchWrapper = null;
-  });

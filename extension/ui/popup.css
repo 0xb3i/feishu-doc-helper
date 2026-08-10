@@ -198,7 +198,36 @@ button {
 /* Ant Statistic 组 */
 .doc-card__stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
+  min-height: 75px;
+}
+
+.doc-card__stats-state {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.doc-card__stats-state--loading {
+  color: var(--primary);
+}
+
+.doc-card__stats-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(23, 125, 220, 0.18);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: overviewSpin 0.8s linear infinite;
+}
+
+@keyframes overviewSpin {
+  to { transform: rotate(360deg); }
 }
 
 .statistic {

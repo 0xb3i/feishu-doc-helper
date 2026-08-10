@@ -20,16 +20,21 @@
     var docxRecordObj = null;
     try { docxRecordObj = docxRecordRaw ? JSON.parse(docxRecordRaw) : null; }
     catch (e) {}
+    var imageEntries = docxRecordObj ? listImageRecordsFromDocxRecord(docxRecordObj) : [];
 
-    return convertImagesToBase64(html).then(function (result) {
+    return convertImagesToBase64(
+      html,
+      imageEntries,
+      content && content.preloadedImageDataUrls
+    ).then(function (result) {
       var htmlWithImages = result.html;
       var tokenToBase64 = result.tokenToBase64 || {};
 
       // Build the ordered image list by walking the recordMap directly so
       // images nested inside table cells / grid columns are picked up.
       var orderedImageBase64List = [];
-      if (docxRecordObj) {
-        docxRecord.listImageRecords(docxRecordObj).forEach(function (entry) {
+      if (imageEntries.length) {
+        imageEntries.forEach(function (entry) {
           var token = entry.image.token || '';
           var base64 = tokenToBase64[token] || '';
           orderedImageBase64List.push({
@@ -54,47 +59,19 @@
         });
       }
 
-      // Image blocks in docxRecord without matching base64 (e.g. nested in
-      // table cells whose <img> isn't part of the rendered fragment) need a
-      // direct fetch using the raw token so the upload-and-replace flow has
-      // image data to send to the server.
-      var fetchMissingChain = Promise.resolve();
-      orderedImageBase64List.forEach(function (img) {
-        if (!img.token || img.base64) return;
-        fetchMissingChain = fetchMissingChain.then(function () {
-          var urls = [
-            '/space/api/box/stream/download/all/?token=' + encodeURIComponent(img.token),
-            '/space/api/box/stream/download/preview/' + encodeURIComponent(img.token) + '/?preview_type=16',
-          ];
-          function tryFetch(index) {
-            if (index >= urls.length) return Promise.resolve(null);
-            return fetchImageAsBase64(urls[index]).then(function (b64) {
-              return b64 || tryFetch(index + 1);
-            });
-          }
-          return tryFetch(0).then(function (base64) {
-            if (base64) img.base64 = base64;
-          });
-        });
-      });
-
-      return fetchMissingChain.then(function () {
-        var hasImages = orderedImageBase64List.length > 0;
-        return {
-          text: text,
-          html: sanitizer.buildClipboardHtml(htmlWithImages, false),
-          docxRecord: docxRecordObj ? JSON.stringify(docxRecordObj) : '',
-          hasDowngradedImages: false,
-          hasImagesToInject: hasImages,
-          hasImagesToUpload: hasImages,
-          orderedImageBase64List: orderedImageBase64List,
-        };
-      });
-    }).catch(function () {
+      var missingImages = orderedImageBase64List.filter(function (img) { return !img.base64; });
+      if (missingImages.length) {
+        throw new Error('图片预处理不完整：' + missingImages.length + ' 张图片未能读取，请重试提取');
+      }
+      var hasImages = orderedImageBase64List.length > 0;
       return {
         text: text,
-        html: sanitizer.buildClipboardHtml(html, false),
-        docxRecord: docxRecordRaw,
+        html: sanitizer.buildClipboardHtml(htmlWithImages, false),
+        docxRecord: docxRecordObj ? JSON.stringify(docxRecordObj) : '',
+        hasDowngradedImages: false,
+        hasImagesToInject: hasImages,
+        hasImagesToUpload: hasImages,
+        orderedImageBase64List: orderedImageBase64List,
       };
     });
   }
@@ -156,6 +133,55 @@
 
   // ── Clipboard write ────────────────────────────────────────────────────────
 
+  function createClipboardBridgeRequestId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+      return 'feishu-helper-clipboard-' + globalThis.crypto.randomUUID();
+    }
+    return 'feishu-helper-clipboard-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+  }
+
+  function writeClipboardPayloadWithExtension(payload, pasteAfterWrite) {
+    return new Promise(function (resolve, reject) {
+      var requestId = createClipboardBridgeRequestId();
+      var settled = false;
+      var timer = setTimeout(function () {
+        finish(reject, new Error('extension clipboard bridge timed out'));
+      }, 5000);
+      function cleanup() {
+        clearTimeout(timer);
+        document.removeEventListener('feishu-helper:clipboard-transfer-result', onResult, true);
+      }
+      function finish(callback, value) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback(value);
+      }
+      function onResult(event) {
+        var detail = (event && event.detail) || {};
+        if (detail.requestId !== requestId) return;
+        if (!detail.ok || !detail.written) {
+          finish(reject, new Error(String(detail.error || 'extension clipboard write failed')));
+          return;
+        }
+        finish(resolve, { written: true, pasted: detail.pasted === true, mode: 'extensionClipboard' });
+      }
+      document.addEventListener('feishu-helper:clipboard-transfer-result', onResult, true);
+      document.dispatchEvent(new CustomEvent('feishu-helper:clipboard-transfer', {
+        detail: {
+          requestId: requestId,
+          payload: {
+            text: String(payload.text || ''),
+            html: String(payload.html || ''),
+            docxRecord: String(payload.docxRecord || ''),
+            imageDataUrl: String(payload.imageDataUrl || ''),
+            pasteAfterWrite: pasteAfterWrite === true,
+          },
+        },
+      }));
+    });
+  }
+
   function writeClipboardPayloadWithExecCommand(payload) {
     return new Promise(function (resolve, reject) {
       var handled = false;
@@ -181,17 +207,25 @@
     });
   }
 
-  function writeClipboardPayload(payload) {
+  function writeClipboardPayload(payload, options) {
     var data = {};
     if (payload.text) data['text/plain'] = new Blob([payload.text], { type: 'text/plain' });
     if (payload.html) data['text/html'] = new Blob([payload.html], { type: 'text/html' });
     if (payload.docxRecord) data['docx/record'] = new Blob([payload.docxRecord], { type: 'text/plain' });
     if (!Object.keys(data).length) return Promise.reject(new Error('clipboard payload empty'));
 
-    if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
-      return navigator.clipboard.write([new ClipboardItem(data)]).catch(function () {
-        return writeClipboardPayloadWithExecCommand(payload);
+    return writeClipboardPayloadWithExtension(payload, options && options.pasteAfterWrite).catch(function () {
+      if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
+        return navigator.clipboard.write([new ClipboardItem(data)]).then(function () {
+          return { written: true, pasted: false, mode: 'navigatorClipboard' };
+        }).catch(function () {
+          return writeClipboardPayloadWithExecCommand(payload).then(function () {
+            return { written: true, pasted: false, mode: 'execCommandCopy' };
+          });
+        });
+      }
+      return writeClipboardPayloadWithExecCommand(payload).then(function () {
+        return { written: true, pasted: false, mode: 'execCommandCopy' };
       });
-    }
-    return writeClipboardPayloadWithExecCommand(payload);
+    });
   }

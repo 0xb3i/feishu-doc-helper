@@ -85,7 +85,26 @@
 
   function getDocumentBodyPasteTarget() {
     var root = getContentRootElement();
-    if (root && isVisibleElement(root)) return root;
+    if (root) {
+      if (root.matches('.zone-container.text-editor[contenteditable="true"]')
+        && root.closest('[data-block-type]') && !root.closest('.page-block-header')) {
+        return root;
+      }
+      var activeEditor = closestEditableElement(document.activeElement);
+      if (activeEditor && activeEditor !== root
+        && activeEditor.matches('.zone-container.text-editor[contenteditable="true"]')
+        && activeEditor.closest('[data-block-type]')
+        && !activeEditor.closest('.page-block-header')) {
+        return activeEditor;
+      }
+      var bodyEditors = Array.prototype.slice.call(
+        root.querySelectorAll('[data-block-type] .zone-container.text-editor[contenteditable="true"]')
+      ).filter(function (editor) {
+        return !editor.closest('.page-block-header') && isVisibleElement(editor);
+      });
+      if (bodyEditors.length) return bodyEditors[0];
+      return null;
+    }
     var candidates = getEditableCandidates({ purpose: 'paste', includeHiddenTextarea: false });
     return candidates.length ? candidates[0] : null;
   }
@@ -112,6 +131,12 @@
         target.scrollIntoView({ block: 'center', inline: 'nearest' });
       }
     } catch (err) {}
+    // 飞书正文 block 默认没有 tabindex；直接 focus() 会把焦点委托给最外层 root，
+    // 使浏览器原生 paste 只改 DOM 而不进入编辑器模型。-1 仅允许脚本聚焦，
+    // 不改变键盘 Tab 顺序。
+    if (!isHiddenPasteTextarea(target) && !target.hasAttribute('tabindex')) {
+      try { target.setAttribute('tabindex', '-1'); } catch (err) {}
+    }
     try { target.focus(); } catch (err) {}
     if (isHiddenPasteTextarea(target)) {
       try {
@@ -129,6 +154,39 @@
     var target = getDocumentBodyPasteTarget();
     if (!target) return false;
     return preparePasteTarget(target);
+  }
+
+  function activateEmptyDocumentBodyForPaste() {
+    var ready = getEditorReadyState();
+    if (!ready || !ready.hasRootBlock || ready.rootChildCount !== 0) return false;
+    // 空白文档的首行占位层与 `.page-block.root-block` 是同一编辑器容器下的
+    // 兄弟节点，并非 root 的后代，不能用 root.querySelector() 定位。
+    var target = Array.prototype.slice.call(document.querySelectorAll('.first-line-empty')).find(function (node) {
+      return isVisibleElement(node)
+        && !!node.querySelector('.docx-empty-placeholder')
+        && !!node.closest('.editor-container');
+    });
+    if (!target) return false;
+    try { target.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (error) {}
+    try { target.click(); } catch (error) { return false; }
+    return true;
+  }
+
+  function waitForDocumentBodyPasteTarget(timeoutMs) {
+    var startedAt = Date.now();
+    var emptyBodyActivated = false;
+    return new Promise(function (resolve) {
+      function check() {
+        if (focusDocumentBodyForPaste()) { resolve(true); return; }
+        if (!emptyBodyActivated) {
+          emptyBodyActivated = activateEmptyDocumentBodyForPaste();
+          if (emptyBodyActivated && focusDocumentBodyForPaste()) { resolve(true); return; }
+        }
+        if (Date.now() - startedAt >= Number(timeoutMs || 0)) { resolve(false); return; }
+        setTimeout(check, 160);
+      }
+      check();
+    });
   }
 
   function extractInsertionHtml(html) {
@@ -212,10 +270,19 @@
     return null;
   }
 
-  function dispatchPastePayload(payload) {
+  function dispatchPastePayload(payload, options) {
     var target = getActivePasteDispatchTarget();
-    if (!target) return false;
+    if (!target) return { pasted: false, mode: 'clipboardOnly' };
     preparePasteTarget(target);
+    if (options && options.allowNativePaste) {
+      try {
+        // clipboardRead / clipboardWrite 扩展权限允许 execCommand 走浏览器原生
+        // paste 管线；飞书只会持久化这类受信任输入。失败时再兼容旧版合成事件。
+        if (document.execCommand('paste')) {
+          return { pasted: true, mode: 'nativePasteCommand' };
+        }
+      } catch (error) {}
+    }
     var dt = new DataTransfer();
     if (payload && payload.text) dt.setData('text/plain', payload.text);
     if (payload && payload.html) dt.setData('text/html', payload.html);
@@ -231,13 +298,14 @@
       target.dispatchEvent(beforeInputEvent);
     } catch (err) {}
     target.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-    return true;
+    return { pasted: true, mode: 'pasteEvent' };
   }
 
   function describePasteMode(mode) {
     if (mode === 'insertHTML') return '直接插入 HTML';
     if (mode === 'domInsert') return '直接写入 DOM';
     if (mode === 'insertText') return '直接插入纯文本';
+    if (mode === 'nativePasteCommand') return '浏览器原生粘贴';
     if (mode === 'pasteEvent') return '派发 paste 事件';
     return '仅写入剪贴板';
   }
@@ -245,11 +313,14 @@
   function runPasteAttempt(payload, options) {
     var insertResult = options.allowInsert ? tryInsertPayloadIntoEditor(payload) : null;
     var autoInserted = !!insertResult;
-    var autoPasted = autoInserted ? false : (!!options.allowDispatch && dispatchPastePayload(payload));
+    var pasteResult = autoInserted || !options.allowDispatch
+      ? { pasted: false, mode: 'clipboardOnly' }
+      : dispatchPastePayload(payload, { allowNativePaste: options.allowNativePaste === true });
+    var autoPasted = pasteResult.pasted;
     return {
       autoInserted: autoInserted,
       autoPasted: autoPasted,
-      pathLabel: describePasteMode(insertResult ? insertResult.mode : (autoPasted ? 'pasteEvent' : 'clipboardOnly')),
+      pathLabel: describePasteMode(insertResult ? insertResult.mode : pasteResult.mode),
     };
   }
 
