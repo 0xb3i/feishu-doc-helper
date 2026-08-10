@@ -31,10 +31,24 @@
     if (!navigator.clipboard || !navigator.clipboard.write || typeof ClipboardItem === 'undefined') {
       return Promise.reject(new Error('binary clipboard API is unavailable'));
     }
-    return toPngBlob(dataUrlToBlob(String(imageDataUrl || ''))).then(function (pngBlob) {
-      return navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
-    });
+    return writeImageBlobPromise(Promise.resolve(dataUrlToBlob(String(imageDataUrl || ''))));
   }
 
-  root.FeishuExtensionImageClipboard = Object.freeze({ writeImageDataUrl: writeImageDataUrl });
+  // ClipboardItem 允许 value 为 Promise。必须在用户点击的同步调用栈内先调
+  // navigator.clipboard.write，再等待图片读取/转码；否则 Chrome 会因用户激活
+  // 已过期返回 PermFail。
+  function writeImageBlobPromise(blobPromise) {
+    if (!navigator.clipboard || !navigator.clipboard.write || typeof ClipboardItem === 'undefined') {
+      return Promise.reject(new Error('binary clipboard API is unavailable'));
+    }
+    var pngPromise = Promise.resolve(blobPromise).then(toPngBlob);
+    return navigator.clipboard.write([new ClipboardItem({ 'image/png': pngPromise })]);
+  }
+
+  root.FeishuExtensionImageClipboard = Object.freeze({
+    dataUrlToBlob: dataUrlToBlob,
+    toPngBlob: toPngBlob,
+    writeImageBlobPromise: writeImageBlobPromise,
+    writeImageDataUrl: writeImageDataUrl,
+  });
 })(globalThis);

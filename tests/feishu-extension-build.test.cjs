@@ -26,6 +26,7 @@ before(() => {
   artifacts.manifest = JSON.parse(fs.readFileSync(path.join(DIST, 'manifest.json'), 'utf8'));
   artifacts.mainWorld = fs.readFileSync(path.join(DIST, 'content/main-world.js'), 'utf8');
   artifacts.bridge = fs.readFileSync(path.join(DIST, 'content/bridge.js'), 'utf8');
+  artifacts.imageClipboard = fs.readFileSync(path.join(DIST, 'shared/image-clipboard.js'), 'utf8');
   artifacts.serviceWorker = fs.readFileSync(path.join(DIST, 'background/service-worker.js'), 'utf8');
   artifacts.popupHtml = fs.readFileSync(path.join(DIST, 'ui/popup.html'), 'utf8');
   artifacts.popupJs = fs.readFileSync(path.join(DIST, 'ui/assets/popup.js'), 'utf8');
@@ -157,6 +158,21 @@ test('image right-click is suppressed in the isolated bridge before Feishu handl
   assert.match(artifacts.bridge, /window\.addEventListener\(type, suppressFeishuImageRightButton, true\)/);
   assert.match(artifacts.bridge, /event\.stopImmediatePropagation\(\)/);
   assert.match(artifacts.bridge, /\[data-block-type="image"\]/);
+  assert.match(artifacts.bridge, /IMAGE_CONTEXT_COPY_EVENT/);
+  assert.match(artifacts.bridge, /event\.type === 'contextmenu'/);
+  assert.match(artifacts.bridge, /gestureIsFresh/);
+  assert.match(artifacts.bridge, /imageElement: getImageElementAtPoint\(event\)/);
+  assert.match(artifacts.bridge, /lastImageContextGesture = null/);
+  assert.match(artifacts.bridge, /writeTrustedContextImage\(imageBlob\)/);
+  assert.doesNotMatch(artifacts.mainWorld, /suppressFeishuRightButton/);
+  assert.match(artifacts.mainWorld, /openImageMenu\(e\.clientX, e\.clientY, info\)/);
+  assert.match(artifacts.mainWorld, /el\.setAttribute\('tabindex', '0'\)/);
+  assert.match(artifacts.mainWorld, /window\.addEventListener\('click', onImageContextMenuClick, true\)/);
+  assert.match(artifacts.mainWorld, /data-feishu-imgctx-action/);
+  assert.match(artifacts.mainWorld, /e\.key !== 'Enter' && e\.key !== ' '/);
+  assert.doesNotMatch(artifacts.mainWorld, /addEventListener\('scroll', closeImageContextMenu/);
+  assert.doesNotMatch(artifacts.mainWorld, /addEventListener\('blur', closeImageContextMenu/);
+  assert.match(artifacts.mainWorld, /addEventListener\('wheel', closeImageContextMenu/);
 });
 
 test('binary image clipboard writes use whichever extension context currently owns focus', () => {
@@ -167,6 +183,10 @@ test('binary image clipboard writes use whichever extension context currently ow
   assert.match(artifacts.popupSource, /handleFocusedClipboardWrite/);
   assert.match(artifacts.popupSource, /document\.hasFocus\(\)/);
   assert.doesNotMatch(artifacts.serviceWorker, /ensureOffscreenClipboardDocument/);
+  assert.match(artifacts.bridge, /writeImageBlobPromise\(blobPromise\)/);
+  assert.match(artifacts.imageClipboard, /new ClipboardItem\(\{ 'image\/png': pngPromise \}\)/);
+  assert.match(artifacts.mainWorld, /return writeThroughTrustedBridge\(\{ url: url \}\)/);
+  assert.doesNotMatch(artifacts.mainWorld, /return attempt\.then\(writeBlobToClipboard\)/);
 });
 
 test('paste flow carries the source document title into the target title slot', () => {

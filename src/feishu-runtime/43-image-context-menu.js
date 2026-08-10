@@ -29,6 +29,7 @@
   };
 
   var imageContextMenuEl = null;
+  var imageContextMenuActions = null;
 
   function closeImageContextMenu() {
     if (imageContextMenuEl) {
@@ -36,9 +37,11 @@
       imageContextMenuEl = null;
     }
     document.removeEventListener('mousedown', onImageContextMenuOutside, true);
-    document.removeEventListener('scroll', closeImageContextMenu, true);
-    window.removeEventListener('blur', closeImageContextMenu, true);
-    document.removeEventListener('keydown', onImageContextMenuKeydown, true);
+    document.removeEventListener('wheel', closeImageContextMenu, true);
+    document.removeEventListener('touchmove', closeImageContextMenu, true);
+    window.removeEventListener('click', onImageContextMenuClick, true);
+    window.removeEventListener('keydown', onImageContextMenuKeydown, true);
+    imageContextMenuActions = null;
   }
 
   function onImageContextMenuOutside(e) {
@@ -47,7 +50,33 @@
   }
 
   function onImageContextMenuKeydown(e) {
-    if (e.key === 'Escape') closeImageContextMenu();
+    if (e.key === 'Escape') {
+      closeImageContextMenu();
+      return;
+    }
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    activateImageContextMenuItem(e);
+  }
+
+  function activateImageContextMenuItem(e) {
+    var target = e.target && e.target.closest
+      ? e.target.closest('[data-feishu-imgctx-action]')
+      : null;
+    if (!target || !imageContextMenuEl || !imageContextMenuEl.contains(target)) return;
+    var action = target.getAttribute('data-feishu-imgctx-action');
+    var handler = imageContextMenuActions && imageContextMenuActions[action];
+    if (typeof handler !== 'function') return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+    closeImageContextMenu();
+    handler();
+  }
+
+  function onImageContextMenuClick(e) {
+    // 飞书会在 document 捕获阶段截断部分编辑器点击。菜单动作必须在更早的
+    // window 捕获阶段处理，才能既收到第一次点击，又保留剪贴板用户激活。
+    activateImageContextMenuItem(e);
   }
 
   function copyImageFromContext(imageInfo) {
@@ -90,20 +119,18 @@
         if (opened) opened.opener = null;
       } },
     ];
+    imageContextMenuActions = {};
 
     items.forEach(function (it) {
       var el = document.createElement('div');
       el.className = 'feishu-imgctx__item';
       el.setAttribute('role', 'menuitem');
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('data-feishu-imgctx-action', it.key);
       el.innerHTML = '<span class="feishu-imgctx__icon">' + (CTX_ICONS[it.key] || '') + '</span>'
         + '<span class="feishu-imgctx__label"></span>';
       el.querySelector('.feishu-imgctx__label').textContent = it.label;
-      el.addEventListener('click', function (ev) {
-        ev.preventDefault();
-        ev.stopPropagation();
-        closeImageContextMenu();
-        it.handler();
-      }, true);
+      imageContextMenuActions[it.key] = it.handler;
       menu.appendChild(el);
     });
 
@@ -120,9 +147,10 @@
 
     setTimeout(function () {
       document.addEventListener('mousedown', onImageContextMenuOutside, true);
-      document.addEventListener('scroll', closeImageContextMenu, true);
-      window.addEventListener('blur', closeImageContextMenu, true);
-      document.addEventListener('keydown', onImageContextMenuKeydown, true);
+      document.addEventListener('wheel', closeImageContextMenu, true);
+      document.addEventListener('touchmove', closeImageContextMenu, true);
+      window.addEventListener('click', onImageContextMenuClick, true);
+      window.addEventListener('keydown', onImageContextMenuKeydown, true);
     }, 0);
   }
 
@@ -147,25 +175,8 @@
     return null;
   }
 
-  // 飞书的"复制保护"提示并不是由 contextmenu 触发，而是挂在右键的
-  // pointerdown/mousedown 上（button===2 时抢先弹提示）。因此仅拦 contextmenu
-  // 不够，必须在 window 捕获阶段最早拦下右键按下类事件，命中图片时直接阻断，
-  // 避免飞书处理器执行。
-  function isRightButton(e) {
-    return e.button === 2 || (e.buttons != null && e.buttons === 2);
-  }
-
-  function suppressFeishuRightButton(e) {
-    if (!isRightButton(e)) return;
-    if (!resolveImageInfoAtPoint(e)) return;
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-  }
-
-  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'auxclick'].forEach(function (type) {
-    registerEventListener(window, type, suppressFeishuRightButton, true);
-  });
+  // 右键按下类事件的权限弹窗拦截由 ISOLATED world bridge 独占负责。
+  // MAIN world 如果先 stopImmediatePropagation，反而会让 bridge 收不到真实手势。
 
   registerEventListener(window, 'contextmenu', function (e) {
     var info = resolveImageInfoAtPoint(e);
@@ -174,7 +185,6 @@
       return;
     }
     e.preventDefault();
-    e.stopImmediatePropagation();
     e.stopPropagation();
     openImageMenu(e.clientX, e.clientY, info);
   }, true);

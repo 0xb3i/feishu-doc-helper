@@ -85,6 +85,25 @@
     return result;
   }
 
+  function getImageElementAtPoint(event) {
+    var target = event && event.target;
+    var image = target && target.nodeType === 1 && typeof target.closest === 'function'
+      ? target.closest('img')
+      : null;
+    if (image) return image;
+    if (!event || typeof document.elementsFromPoint !== 'function') return null;
+    var stack = document.elementsFromPoint(event.clientX, event.clientY) || [];
+    for (var i = 0; i < stack.length; i++) {
+      var node = stack[i];
+      if (!node || node.nodeType !== 1) continue;
+      image = node.closest && node.closest('img');
+      if (image) return image;
+      var block = node.closest && node.closest('[data-block-type="image"], [data-page-block-type="image"]');
+      if (block && block.querySelector('img')) return block.querySelector('img');
+    }
+    return null;
+  }
+
   function isImageLikeTarget(target) {
     if (!target || target.nodeType !== 1) return false;
     if (target.closest('img')) return true;
@@ -118,11 +137,18 @@
   }
 
   function rememberTrustedImageContextGesture(event) {
-    if (!event || event.isTrusted !== true || !isRightButton(event) || !isImageLikePoint(event)) return;
+    var isContextMenuGesture = event && event.type === 'contextmenu';
+    if (!event || event.isTrusted !== true
+      || (!isRightButton(event) && !isContextMenuGesture)
+      || !isImageLikePoint(event)) return;
     var candidates = getApprovedImageCandidatesAtPoint(event);
-    lastImageContextGesture = candidates.length
-      ? { createdAt: Date.now(), candidates: candidates }
-      : null;
+    // 飞书会把已鉴权加载的图片换成 blob: URL。它不属于后台可请求的
+    // HTTPS allowlist，但仍是真实右击命中的可见图片，允许后续仅写入已渲染像素。
+    lastImageContextGesture = {
+      createdAt: Date.now(),
+      candidates: candidates,
+      imageElement: getImageElementAtPoint(event),
+    };
   }
 
   function suppressFeishuImageRightButton(event) {
@@ -137,6 +163,103 @@
     window.addEventListener(type, suppressFeishuImageRightButton, true);
   });
   window.addEventListener('contextmenu', rememberTrustedImageContextGesture, true);
+
+  var IMAGE_CONTEXT_COPY_EVENT = protocol.DOM_EVENTS.IMAGE_CONTEXT_COPY;
+  var IMAGE_CONTEXT_COPY_RESULT_EVENT = protocol.DOM_EVENTS.IMAGE_CONTEXT_COPY_RESULT;
+
+  function replyImageContextCopy(requestId, result) {
+    document.dispatchEvent(new CustomEvent(IMAGE_CONTEXT_COPY_RESULT_EVENT, {
+      detail: Object.assign({ requestId: requestId }, result),
+    }));
+  }
+
+  function renderedImagePngBlob(image) {
+    return new Promise(function (resolve, reject) {
+      try {
+        if (!image || !(image.naturalWidth || image.width)) {
+          reject(new Error('rendered image is unavailable'));
+          return;
+        }
+        var canvas = document.createElement('canvas');
+        canvas.width = image.naturalWidth || image.width;
+        canvas.height = image.naturalHeight || image.height;
+        canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(function (blob) {
+          if (blob) resolve(blob);
+          else reject(new Error('rendered image conversion returned no data'));
+        }, 'image/png');
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  function fetchTrustedImageBlob(url) {
+    return new Promise(function (resolve, reject) {
+      chrome.runtime.sendMessage({ source: protocol.MESSAGES.IMAGE_FETCH, url: url }, function (response) {
+        if (chrome.runtime.lastError || !response || !response.ok || !response.dataUrl) {
+          reject(new Error(chrome.runtime.lastError
+            ? chrome.runtime.lastError.message
+            : String(response && response.error || 'image fetch failed')));
+          return;
+        }
+        try {
+          resolve(globalThis.FeishuExtensionImageClipboard.dataUrlToBlob(response.dataUrl));
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  }
+
+  function writeTrustedContextImage(blobPromise) {
+    var clipboard = globalThis.FeishuExtensionImageClipboard;
+    if (!document.hasFocus() || !clipboard) {
+      return Promise.reject(new Error('document clipboard context is unavailable'));
+    }
+    return clipboard.writeImageBlobPromise(blobPromise);
+  }
+
+  // MAIN world 只提供已渲染像素或右击命中的受控 URL；孤立世界要求
+  // 最近的真实图片右击手势，并且一次性消耗它，防止页面脚本任意写剪贴板。
+  document.addEventListener(IMAGE_CONTEXT_COPY_EVENT, function (event) {
+    var detail = (event && event.detail) || {};
+    var requestId = String(detail.requestId || '');
+    var sourceUrl = String(detail.url || '');
+    if (!protocol.validateRequestId(requestId)) return;
+
+    var gesture = lastImageContextGesture;
+    var gestureIsFresh = Boolean(gesture)
+      && Date.now() - gesture.createdAt <= protocol.LIMITS.IMAGE_GESTURE_TTL_MS;
+    if (!gestureIsFresh) {
+      replyImageContextCopy(requestId, { ok: false, error: 'image copy requires a recent trusted context-menu gesture' });
+      return;
+    }
+
+    var urlValidation = sourceUrl ? protocol.validateImageUrl(sourceUrl, location.href) : null;
+    var hasRenderedImage = Boolean(gesture.imageElement && gesture.imageElement.isConnected);
+    var hasApprovedUrl = Boolean(urlValidation && urlValidation.ok
+      && gesture.candidates.indexOf(urlValidation.url) !== -1);
+    if (!hasRenderedImage && !hasApprovedUrl) {
+      replyImageContextCopy(requestId, { ok: false, error: 'image copy payload does not match the trusted gesture' });
+      return;
+    }
+
+    lastImageContextGesture = null;
+    var imageBlob = hasRenderedImage
+      ? renderedImagePngBlob(gesture.imageElement).catch(function (error) {
+        if (hasApprovedUrl) return fetchTrustedImageBlob(urlValidation.url);
+        throw error;
+      })
+      : fetchTrustedImageBlob(urlValidation.url);
+
+    // 这一行必须在菜单 click 事件的同步调用栈中执行。imageBlob 可异步完成。
+    writeTrustedContextImage(imageBlob).then(function () {
+      replyImageContextCopy(requestId, { ok: true, written: true, mode: hasRenderedImage ? 'rendered-pixels' : 'background-fetch' });
+    }).catch(function (error) {
+      replyImageContextCopy(requestId, { ok: false, error: String(error && error.message || error) });
+    });
+  }, true);
 
   // 转发页面运行时的实时进度到 popup / service worker（供关闭后重开恢复进度）。
   document.addEventListener(UI_PROGRESS_EVENT, function (event) {

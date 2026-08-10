@@ -341,6 +341,8 @@ test('privileged image fetch policy is fail-closed', () => {
   assert.equal(protocol.detectImageMime(Uint8Array.from([255, 216, 255, 224])), 'image/jpeg');
   assert.equal(protocol.detectImageMime(Uint8Array.from([60, 115, 118, 103, 62])), '');
   assert.equal(protocol.detectImageMime(Uint8Array.from([60, 104, 116, 109, 108, 62])), '');
+  assert.equal(protocol.DOM_EVENTS.IMAGE_CONTEXT_COPY, 'feishu-helper:image-context-copy');
+  assert.equal(protocol.DOM_EVENTS.IMAGE_CONTEXT_COPY_RESULT, 'feishu-helper:image-context-copy-result');
 });
 
 test('malformed and executable links are rejected without throwing', () => {

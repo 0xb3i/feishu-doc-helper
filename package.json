@@ -1,6 +1,6 @@
 {
   "name": "feishu-doc-helper-extension",
-  "version": "1.3.27",
+  "version": "1.3.29",
   "description": "飞书文档助手 Chrome 扩展",
   "private": true,
   "type": "commonjs",
