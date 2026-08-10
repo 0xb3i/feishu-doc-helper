@@ -236,6 +236,19 @@
     return true;
   }
 
+  function waitForPreservedEmptyBodyRecordsRemoval(captured, timeoutMs) {
+    if (!captured) return Promise.resolve(false);
+    var startedAt = Date.now();
+    return new Promise(function (resolve) {
+      function check() {
+        if (removePreservedEmptyBodyRecords(captured)) { resolve(true); return; }
+        if (Date.now() - startedAt >= Number(timeoutMs || 0)) { resolve(false); return; }
+        setTimeout(check, 50);
+      }
+      check();
+    });
+  }
+
   function extractInsertionHtml(html) {
     if (!html) return '';
     var fragmentMatch = html.match(/<!--StartFragment-->([\s\S]*?)<!--EndFragment-->/i);

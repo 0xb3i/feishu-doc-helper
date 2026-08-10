@@ -28,12 +28,14 @@ function loadPasteTargetRuntime(editorAPI) {
   const context = {
     attribs,
     getEditorAPI: () => editorAPI,
+    setTimeout,
   };
   vm.createContext(context);
   vm.runInContext(
     source + '\nthis.__pasteTargetTestApi = {'
       + 'captureEmptyBodyRecordsBeforePaste: captureEmptyBodyRecordsBeforePaste,'
-      + 'removePreservedEmptyBodyRecords: removePreservedEmptyBodyRecords };',
+      + 'removePreservedEmptyBodyRecords: removePreservedEmptyBodyRecords,'
+      + 'waitForPreservedEmptyBodyRecordsRemoval: waitForPreservedEmptyBodyRecordsRemoval };',
     context,
     { filename: '35-paste-target.js' }
   );
@@ -94,4 +96,44 @@ test('paste cleanup preserves non-empty or source-created blank blocks', () => {
   assert.equal(api.captureEmptyBodyRecordsBeforePaste(), null);
   assert.equal(api.removePreservedEmptyBodyRecords(null), false);
   assert.equal(transactions, 0);
+});
+
+test('paste cleanup removes the target placeholder as soon as new body content appears', async () => {
+  const records = new Map([
+    ['root', { id: 'root', snapshot: { type: 'page', children: ['empty'] } }],
+    ['empty', { id: 'empty', snapshot: textSnapshot('') }],
+  ]);
+  let removedAt = 0;
+  const editorAPI = {
+    structService: {
+      rootBlock: {
+        record: records.get('root'),
+        children: [{ record: records.get('empty') }],
+      },
+    },
+    dataService: {
+      getRecordMap: () => records,
+      applyTransaction(_name, callback) {
+        callback({
+          replaceChildren(_rootId, children) {
+            records.get('root').snapshot.children = children;
+            removedAt = Date.now();
+          },
+        });
+      },
+    },
+  };
+  const api = loadPasteTargetRuntime(editorAPI);
+  const captured = api.captureEmptyBodyRecordsBeforePaste();
+  const startedAt = Date.now();
+  const removal = api.waitForPreservedEmptyBodyRecordsRemoval(captured, 500);
+
+  setTimeout(() => {
+    records.set('body', { id: 'body', snapshot: { type: 'callout' } });
+    records.get('root').snapshot.children = ['empty', 'body'];
+  }, 20);
+
+  assert.equal(await removal, true);
+  assert.deepEqual(records.get('root').snapshot.children, ['body']);
+  assert.ok(removedAt - startedAt < 300);
 });

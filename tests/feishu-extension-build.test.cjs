@@ -277,6 +277,22 @@ test('image reconciliation skips only its redundant second text-settling wait', 
   assert.match(artifacts.mainWorld, /waitForPasteBodySettled\(pending, 12000\)/);
 });
 
+test('target placeholder cleanup starts while the pasted body is still settling', () => {
+  assert.match(artifacts.mainWorld, /function waitForPreservedEmptyBodyRecordsRemoval/);
+  assert.match(
+    artifacts.mainWorld,
+    /var earlyEmptyCleanup = waitForPreservedEmptyBodyRecordsRemoval\([\s\S]*?Promise\.all\(\[\s*waitForPasteBodySettled\(pending, 12000\),\s*earlyEmptyCleanup/
+  );
+  assert.match(artifacts.mainWorld, /removePreservedEmptyBodyRecords\(emptyBodyRecordsBeforePaste\)/);
+  const targetReadyIndex = artifacts.mainWorld.indexOf('return waitForDocumentBodyPasteTarget(6000)');
+  const captureIndex = artifacts.mainWorld.indexOf(
+    'emptyBodyRecordsBeforePaste = captureEmptyBodyRecordsBeforePaste()',
+    targetReadyIndex
+  );
+  const commitIndex = artifacts.mainWorld.indexOf('return commitPaste(', captureIndex);
+  assert.ok(targetReadyIndex >= 0 && targetReadyIndex < captureIndex && captureIndex < commitIndex);
+});
+
 test('browser whiteboard apply relies on node verification without a fixed trailing delay', () => {
   assert.match(artifacts.mainWorld, /function importIntoTargetWhiteboard/);
   assert.match(artifacts.mainWorld, /countState\.count === expectedState\.count/);
