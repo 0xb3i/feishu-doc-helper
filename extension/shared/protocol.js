@@ -49,7 +49,6 @@
   var PENDING_OPS = Object.freeze({
     GET: 'get',
     SET: 'set',
-    DELETE: 'delete',
   });
 
   var NATIVE_MESSAGING = Object.freeze({
@@ -60,7 +59,6 @@
       EXPORT: 'export',
       PREFLIGHT: 'preflight',
       APPLY: 'apply',
-      RECONCILE_IMAGES: 'reconcileImages',
       DISCARD: 'discard',
     }),
   });
@@ -601,6 +599,8 @@
     var imageListValidation = validatePendingImageList(value.orderedImageBase64List, schemaVersion === 1);
     if (!imageListValidation.ok) return imageListValidation;
 
+    // Retired image flags are accepted only as inert fields on pending data
+    // written by older builds; the one-hour TTL bounds this storage compatibility.
     var booleanFields = ['hasDowngradedImages', 'hasImagesToInject', 'hasImagesToUpload'];
     for (var j = 0; j < booleanFields.length; j++) {
       var booleanField = booleanFields[j];
@@ -632,10 +632,6 @@
     if (unknownField) {
       return { ok: false, error: 'clipboard payload has an unsupported field: ' + unknownField };
     }
-    var bytes = getJsonByteLength(value);
-    if (bytes < 0 || bytes > LIMITS.MAX_CLIPBOARD_PAYLOAD_BYTES) {
-      return { ok: false, error: 'clipboard payload exceeds size limit' };
-    }
     var fields = ['text', 'html', 'docxRecord'];
     var hasContent = false;
     for (var i = 0; i < fields.length; i++) {
@@ -649,15 +645,21 @@
       return { ok: false, error: 'clipboard image payload must be a string' };
     }
     if (value.imageDataUrl) {
+      if (hasContent) return { ok: false, error: 'clipboard image and document payloads must be separate' };
       var imageValidation = validateImageDataUrl(value.imageDataUrl);
       if (!imageValidation.ok) return imageValidation;
       hasContent = true;
+    } else {
+      var bytes = getJsonByteLength(value);
+      if (bytes < 0 || bytes > LIMITS.MAX_CLIPBOARD_PAYLOAD_BYTES) {
+        return { ok: false, error: 'clipboard payload exceeds size limit' };
+      }
     }
     if (!hasContent) return { ok: false, error: 'clipboard payload is empty' };
     if (typeof value.pasteAfterWrite !== 'boolean') {
       return { ok: false, error: 'clipboard paste flag must be a boolean' };
     }
-    return { ok: true, bytes: bytes };
+    return { ok: true, bytes: value.imageDataUrl ? value.imageDataUrl.length : bytes };
   }
 
   function validateNativeMessagingRequest(value) {
@@ -666,7 +668,7 @@
     }
     var allowedFields = {
       type: true, host: true, op: true, action: true,
-      bundleId: true, sourceUrl: true, targetUrl: true, images: true,
+      bundleId: true, sourceUrl: true, targetUrl: true,
     };
     var unknownField = findUnsupportedField(value, allowedFields);
     if (unknownField) {
@@ -714,28 +716,6 @@
       if (action !== ACTIONS.PASTE || !isBundleId(value.bundleId)
         || !hasBundleId || !hasTargetUrl || !isSupportedDocumentUrl(value.targetUrl) || hasSourceUrl) {
         return { ok: false, error: 'native target request fields are invalid' };
-      }
-      return { ok: true, op: op };
-    }
-    if (op === NATIVE_MESSAGING.OPS.RECONCILE_IMAGES) {
-      if (action !== ACTIONS.PASTE || hasBundleId || hasSourceUrl || !hasTargetUrl
-        || !Array.isArray(value.images) || !value.images.length || value.images.length > 500) {
-        return { ok: false, error: 'native image reconciliation request fields are invalid' };
-      }
-      var seenMarkers = Object.create(null);
-      var seenBlocks = Object.create(null);
-      for (var imageIndex = 0; imageIndex < value.images.length; imageIndex++) {
-        var image = value.images[imageIndex];
-        if (!image || typeof image !== 'object' || Array.isArray(image)
-          || findUnsupportedField(image, { marker: true, targetToken: true, stagingBlockId: true })
-          || !/^\[\[FEISHU_HELPER_IMAGE:[a-z0-9]+:[0-9]{4}\]\]$/.test(String(image.marker || ''))
-          || !isBoundedIdentifier(image.targetToken, LIMITS.MAX_IMAGE_TOKEN_LENGTH)
-          || !isBoundedIdentifier(image.stagingBlockId, LIMITS.MAX_IMAGE_TOKEN_LENGTH)
-          || seenMarkers[image.marker] || seenBlocks[image.stagingBlockId]) {
-          return { ok: false, error: 'native image reconciliation binding is invalid' };
-        }
-        seenMarkers[image.marker] = true;
-        seenBlocks[image.stagingBlockId] = true;
       }
       return { ok: true, op: op };
     }

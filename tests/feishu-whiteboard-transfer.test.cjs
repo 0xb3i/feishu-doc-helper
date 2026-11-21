@@ -5,9 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const transfer = require('../lib/feishu-whiteboard-transfer.cjs');
-const { BundleStore } = require('../native-host/bundle-store.cjs');
+const { BundleStore, writeJsonAtomic } = require('../native-host/bundle-store.cjs');
 const {
   TransferService,
   buildCanonicalDocumentUrl,
@@ -64,6 +65,161 @@ function saveSimpleBundle(store) {
   });
   return metadata;
 }
+
+test('bundle expiry and discard preserve an active transfer until its lock is released', async (t) => {
+  const store = new BundleStore({ dataDir: makeTempDir(t) });
+  saveSimpleBundle(store);
+  const bundleDir = store.bundleDir(BUNDLE_ID);
+  await store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async function () {
+    const bundle = store.loadBundle(BUNDLE_ID);
+    bundle.expiresAt = Date.now() - 1;
+    store.saveBundle(bundle);
+    store.cleanupExpired();
+    assert.throws(() => store.loadBundle(BUNDLE_ID), /已过期/);
+    assert.throws(() => store.discard(BUNDLE_ID), /迁移正在执行/);
+    assert.ok(fs.existsSync(path.join(bundleDir, 'bundle.json')));
+    store.saveJournal(BUNDLE_ID, 'TargetDoc1', { status: 'complete' });
+    assert.equal(store.loadJournal(BUNDLE_ID, 'TargetDoc1').status, 'complete');
+  });
+  store.cleanupExpired();
+  assert.equal(fs.existsSync(bundleDir), false);
+});
+
+test('target locks reject overlapping work and release after callback failure', async (t) => {
+  const store = new BundleStore({ dataDir: makeTempDir(t) });
+  saveSimpleBundle(store);
+  await assert.rejects(store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async function () {
+    assert.throws(() => store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async function () {}), /正在执行/);
+    throw new Error('transfer interrupted');
+  }), /transfer interrupted/);
+  assert.equal(await store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async () => 'retried'), 'retried');
+  assert.deepEqual(fs.readdirSync(path.join(store.bundleDir(BUNDLE_ID), 'targets')), []);
+});
+
+test('expired cleanup shares the same stale-owner and incomplete-lock rules as acquisition', async (t) => {
+  const store = new BundleStore({ dataDir: makeTempDir(t) });
+  saveSimpleBundle(store);
+  const bundle = store.loadBundle(BUNDLE_ID);
+  bundle.expiresAt = Date.now() - 1;
+  store.saveBundle(bundle);
+  const lockDir = path.join(store.bundleDir(BUNDLE_ID), 'targets', store.targetKey(BUNDLE_ID, 'TargetDoc1') + '.lock');
+  fs.mkdirSync(lockDir);
+  store.cleanupExpired();
+  assert.ok(fs.existsSync(lockDir), 'a newly created lock without its owner record must survive cleanup');
+  const oldTime = new Date(Date.now() - 11 * 60 * 1000);
+  fs.utimesSync(lockDir, oldTime, oldTime);
+  await store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async function () {
+    store.cleanupExpired();
+    assert.ok(fs.existsSync(lockDir), 'reclaimed lock protects the ongoing transfer');
+  });
+  fs.mkdirSync(lockDir);
+  writeJsonAtomic(path.join(lockDir, 'owner'), { pid: 0, heartbeatAt: oldTime.getTime() });
+  store.cleanupExpired();
+  assert.equal(fs.existsSync(store.bundleDir(BUNDLE_ID)), false);
+});
+
+test('failed atomic bundle writes leave no temporary file or replaced target', (t) => {
+  const dir = makeTempDir(t);
+  const target = path.join(dir, 'bundle.json');
+  fs.mkdirSync(target);
+  assert.throws(() => writeJsonAtomic(target, { secret: 'asset-token' }));
+  assert.deepEqual(fs.readdirSync(dir), ['bundle.json']);
+  assert.ok(fs.statSync(target).isDirectory());
+});
+
+test('lifecycle gate excludes another Host between lock inspection and bundle deletion', async (t) => {
+  for (const operation of ['discard', 'cleanupExpired']) {
+    await t.test(operation, (t) => {
+      const dataDir = makeTempDir(t);
+      const store = new BundleStore({ dataDir });
+      saveSimpleBundle(store);
+      const bundle = store.loadBundle(BUNDLE_ID);
+      bundle.expiresAt = Date.now() - 1;
+      store.saveBundle(bundle);
+      const inspect = store.hasActiveTargetLock.bind(store);
+      let inspected = false;
+      store.hasActiveTargetLock = function (bundleId, now) {
+        const active = inspect(bundleId, now);
+        if (!inspected) {
+          inspected = true;
+          const result = spawnSync(process.execPath, ['-e', `
+            const { BundleStore } = require(process.argv[1]);
+            const store = new BundleStore({ dataDir: process.argv[2] });
+            try {
+              store.withTargetLock(process.argv[3], 'TargetDoc1', async () => {
+                process.stdout.write('acquired');
+              }).catch(error => { process.stderr.write(error.message); process.exitCode = 1; });
+            } catch (error) { process.stdout.write(error.code || error.message); }
+          `, require.resolve('../native-host/bundle-store.cjs'), dataDir, BUNDLE_ID], { encoding: 'utf8' });
+          assert.equal(result.status, 0, result.stderr);
+          assert.equal(result.stdout, 'FEISHU_BUNDLE_BUSY');
+        }
+        return active;
+      };
+      if (operation === 'discard') store.discard(BUNDLE_ID);
+      else store.cleanupExpired();
+      assert.equal(inspected, true);
+      assert.deepEqual(fs.readdirSync(store.bundleRoot), []);
+      assert.throws(() => store.saveJournal(BUNDLE_ID, 'TargetDoc1', { status: 'late' }), /ENOENT/);
+      assert.equal(fs.existsSync(store.bundleDir(BUNDLE_ID)), false, 'late journal writes cannot resurrect discarded data');
+    });
+  }
+});
+
+test('target lock acquisition excludes cleanup before publishing its owner and releases a failed gate', async (t) => {
+  const store = new BundleStore({ dataDir: makeTempDir(t) });
+  saveSimpleBundle(store);
+  const bundleDir = store.bundleDir(BUNDLE_ID);
+  const lockPath = path.join(bundleDir, 'targets', store.targetKey(BUNDLE_ID, 'TargetDoc1') + '.lock');
+  const originalMkdir = fs.mkdirSync;
+  let fail = true;
+  t.mock.method(fs, 'mkdirSync', function (dir, options) {
+    if (dir === lockPath && fail) {
+      fail = false;
+      assert.throws(() => store.discard(BUNDLE_ID), { code: 'FEISHU_BUNDLE_BUSY' });
+      const error = new Error('simulated lock publication failure');
+      error.code = 'EACCES';
+      throw error;
+    }
+    return originalMkdir(dir, options);
+  });
+  assert.throws(() => store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async () => {}), /publication failure/);
+  assert.equal(fs.existsSync(bundleDir), true);
+  assert.deepEqual(fs.readdirSync(bundleDir).sort(), ['assets', 'bundle.json', 'targets']);
+  assert.equal(await store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async () => 'retried'), 'retried');
+});
+
+test('a crashed lifecycle owner protects ongoing work and is then discarded without admitting new writes', async (t) => {
+  const store = new BundleStore({ dataDir: makeTempDir(t) });
+  saveSimpleBundle(store);
+  const bundleDir = store.bundleDir(BUNDLE_ID);
+  const exited = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.equal(exited.status, 0);
+  await store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async function () {
+    fs.symlinkSync(exited.pid + '-' + 'f'.repeat(32), path.join(bundleDir, '.lifecycle.lock'));
+    assert.throws(() => store.discard(BUNDLE_ID), { code: 'FEISHU_BUNDLE_BUSY' });
+    assert.ok(fs.existsSync(path.join(bundleDir, 'bundle.json')));
+  });
+  assert.throws(() => store.withTargetLock(BUNDLE_ID, 'TargetDoc1', async () => {}), { code: 'FEISHU_BUNDLE_BUSY' });
+  store.discard(BUNDLE_ID);
+  assert.deepEqual(fs.readdirSync(store.bundleRoot), []);
+});
+
+test('cleanup finishes a bundle deletion interrupted after atomic retirement', (t) => {
+  const store = new BundleStore({ dataDir: makeTempDir(t) });
+  saveSimpleBundle(store);
+  const originalRm = fs.rmSync;
+  t.mock.method(fs, 'rmSync', function (file, options) {
+    if (path.basename(file).startsWith('.discarded-')) throw new Error('simulated interrupted removal');
+    return originalRm(file, options);
+  });
+  assert.throws(() => store.discard(BUNDLE_ID), /interrupted removal/);
+  assert.equal(fs.existsSync(store.bundleDir(BUNDLE_ID)), false);
+  assert.equal(fs.readdirSync(store.bundleRoot).length, 1);
+  t.mock.restoreAll();
+  store.cleanupExpired();
+  assert.deepEqual(fs.readdirSync(store.bundleRoot), []);
+});
 
 function createTargetClient(metadata, failUpdate) {
   const marker = metadata.slots[0].marker;
@@ -986,6 +1142,10 @@ test('installer resolves the npm launcher to a cancellable native lark-cli binar
   fs.chmodSync(wrapper, 0o700);
   fs.chmodSync(native, 0o700);
   assert.equal(discoverLarkCli(wrapper), fs.realpathSync(native));
+  assert.equal(discoverLarkCli(native), fs.realpathSync(native));
+  const customWrapper = path.join(root, 'custom-cli');
+  fs.writeFileSync(customWrapper, '#!/bin/sh\nexec lark-cli "$@"\n');
+  assert.throws(() => discoverLarkCli(customWrapper), /脚本包装器/);
 });
 
 test('installer keeps working when an optional browser manifest directory is unavailable', (t) => {
@@ -1009,6 +1169,10 @@ test('installer keeps working when an optional browser manifest directory is una
       path.join(unavailableParent, 'another-directory'),
     ], 'com.example.host.json', manifest);
   }, /无法为任何受支持浏览器安装/);
+  const collision = path.join(availableDirectory, 'collision.json');
+  fs.mkdirSync(collision);
+  assert.throws(() => installNativeManifests([availableDirectory], 'collision.json', manifest), /无法为任何/);
+  assert.deepEqual(fs.readdirSync(availableDirectory).sort(), ['collision.json', 'com.example.host.json']);
 });
 
 test('profile routing and host request validation fail closed across tenants', () => {

@@ -122,9 +122,10 @@
     return fiberKey ? el[fiberKey] : null;
   }
 
-  function findEditorApiValue(extractor) {
+  function findEditorApiValue(extractor, contentRoot) {
     var candidates = [];
-    var contentRoot = getContentRootElement();
+    if (contentRoot === undefined) contentRoot = getContentRootElement();
+    var visitedFibers = new Set();
     function push(node) {
       if (!node || node.nodeType !== 1 || candidates.indexOf(node) !== -1) return;
       if (contentRoot && node !== contentRoot && !contentRoot.contains(node)) return;
@@ -146,9 +147,12 @@
         var fiber = getReactFiberNode(node);
         var fiberDepth = 0;
         while (fiber && fiberDepth < 40) {
-          var props = fiber.memoizedProps || {};
-          var value = extractor(props);
-          if (value) return value;
+          if (!visitedFibers.has(fiber)) {
+            visitedFibers.add(fiber);
+            var props = fiber.memoizedProps || {};
+            var value = extractor(props);
+            if (value) return value;
+          }
           fiber = fiber.return;
           fiberDepth++;
         }
@@ -159,14 +163,14 @@
     return null;
   }
 
-  function getStructService() {
+  function getStructService(contentRoot) {
     return findEditorApiValue(function (props) {
       return props.editorAPI && props.editorAPI.structService;
-    });
+    }, contentRoot);
   }
 
-  function getEditorAPI() {
-    return findEditorApiValue(function (props) { return props.editorAPI; });
+  function getEditorAPI(contentRoot) {
+    return findEditorApiValue(function (props) { return props.editorAPI; }, contentRoot);
   }
 
   function getDocToken() {
@@ -214,9 +218,10 @@
   }
 
   function getEditorReadyState() {
-    var root = getContentRootElement() || document.querySelector(EDITABLE_SELECTOR);
-    var editorAPI = getEditorAPI();
-    var structService = (editorAPI && editorAPI.structService) || getStructService();
+    var contentRoot = getContentRootElement();
+    var root = contentRoot || document.querySelector(EDITABLE_SELECTOR);
+    var editorAPI = getEditorAPI(contentRoot);
+    var structService = (editorAPI && editorAPI.structService) || getStructService(contentRoot);
     var hasStructAPI = !!(structService && structService.rootBlock);
     // Newer Feishu builds may have rendered content even before our React fiber
     // probes succeed, so treat a meaningful innerHTML as a usable fallback.

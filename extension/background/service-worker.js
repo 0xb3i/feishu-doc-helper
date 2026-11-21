@@ -12,7 +12,7 @@ var PENDING_PASTE = protocol.MESSAGES.PENDING_PASTE;
 var STORAGE_PREFIX = 'feishu-progress:';
 var PENDING_PASTE_KEY = 'feishu-pending-paste';
 var PENDING_PASTE_CLEANUP_ALARM = 'feishu-pending-paste-cleanup';
-var pendingWriteQueue = Promise.resolve();
+var pendingOperationQueue = Promise.resolve();
 
 var MENU_ITEMS = [
   { id: 'extract', title: '提取当前文档' },
@@ -105,20 +105,34 @@ function clearPendingPasteCleanupAlarm() {
   if (chrome.alarms && chrome.alarms.clear) chrome.alarms.clear(PENDING_PASTE_CLEANUP_ALARM);
 }
 
+// Serialize reads, writes and expiry cleanup together: a stale read must never
+// remove a newer extraction that was saved while storage.get was in flight.
+function queuePendingOperation(operation) {
+  var result = pendingOperationQueue.then(operation);
+  pendingOperationQueue = result.catch(function () {});
+  return result;
+}
+
+async function readPendingPaste(area) {
+  var items = await area.get(PENDING_PASTE_KEY);
+  var value = (items && items[PENDING_PASTE_KEY]) || null;
+  if (!value) { clearPendingPasteCleanupAlarm(); return null; }
+  var validation = protocol.validatePendingPayload(value);
+  if (isPendingPasteExpired(value) || !validation.ok) {
+    await area.remove(PENDING_PASTE_KEY);
+    clearPendingPasteCleanupAlarm();
+    if (!validation.ok) throw new Error(validation.error);
+    return null;
+  }
+  schedulePendingPasteCleanup(value);
+  return value;
+}
+
 function cleanupExpiredPendingPaste() {
   var area = getLocalArea();
-  if (!area) return;
-  area.get(PENDING_PASTE_KEY, function (items) {
-    if (chrome.runtime.lastError) return;
-    var value = (items && items[PENDING_PASTE_KEY]) || null;
-    if (!value) { clearPendingPasteCleanupAlarm(); return; }
-    if (isPendingPasteExpired(value) || !protocol.validatePendingPayload(value).ok) {
-      area.remove(PENDING_PASTE_KEY);
-      clearPendingPasteCleanupAlarm();
-    } else {
-      schedulePendingPasteCleanup(value);
-    }
-  });
+  if (!area) return Promise.resolve();
+  return queuePendingOperation(function () { return readPendingPaste(area); })
+    .catch(function (error) { console.warn('[Feishu Helper] pending cleanup failed:', error.message); });
 }
 
 function sendError(sendResponse, message) {
@@ -156,22 +170,6 @@ function normalizePendingForStorage(value, senderInfo) {
   return normalized;
 }
 
-function queuePendingPasteWrite(area, value) {
-  var operation = pendingWriteQueue.catch(function () {}).then(function () {
-    return new Promise(function (resolve, reject) {
-      var data = {};
-      data[PENDING_PASTE_KEY] = value;
-      area.set(data, function () {
-        var error = chrome.runtime.lastError;
-        if (error) reject(new Error(error.message));
-        else resolve();
-      });
-    });
-  });
-  pendingWriteQueue = operation;
-  return operation;
-}
-
 function getTrustedDocumentSender(sender) {
   if (!sender || sender.id !== chrome.runtime.id || !sender.tab
     || !Number.isInteger(sender.tab.id) || sender.frameId !== 0) {
@@ -206,39 +204,65 @@ function readBlobAsDataUrl(blob) {
 }
 
 function validateImageResponse(response, documentUrl) {
-  if (!response || !response.ok) {
-    throw new Error('image request failed with HTTP ' + Number((response && response.status) || 0));
-  }
-  var finalUrl = protocol.validateImageUrl(response.url, documentUrl);
-  if (!finalUrl.ok) throw new Error('image redirect rejected: ' + finalUrl.error);
-
-  var mime = protocol.normalizeImageMime(response.headers.get('content-type'));
-  if (!protocol.isAllowedImageMime(mime) && mime !== 'application/octet-stream') {
-    throw new Error('response is not an approved image MIME');
-  }
-
-  var contentLengthHeader = response.headers.get('content-length');
-  if (contentLengthHeader) {
-    var contentLength = Number(contentLengthHeader);
-    if (!Number.isFinite(contentLength) || contentLength < 0
-      || contentLength > protocol.LIMITS.MAX_IMAGE_BYTES) {
-      throw new Error('image response exceeds size limit');
+  try {
+    if (!response || !response.ok) {
+      throw new Error('image request failed with HTTP ' + Number((response && response.status) || 0));
     }
+    var finalUrl = protocol.validateImageUrl(response.url, documentUrl);
+    if (!finalUrl.ok) throw new Error('image redirect rejected: ' + finalUrl.error);
+
+    var mime = protocol.normalizeImageMime(response.headers.get('content-type'));
+    if (!protocol.isAllowedImageMime(mime) && mime !== 'application/octet-stream') {
+      throw new Error('response is not an approved image MIME');
+    }
+
+    var contentLengthHeader = response.headers.get('content-length');
+    if (contentLengthHeader) {
+      var contentLength = Number(contentLengthHeader);
+      if (!Number.isFinite(contentLength) || contentLength < 0
+        || contentLength > protocol.LIMITS.MAX_IMAGE_BYTES) {
+        throw new Error('image response exceeds size limit');
+      }
+    }
+    return { response: response, finalUrl: finalUrl, mime: mime };
+  } catch (error) {
+    if (response && response.body) response.body.cancel().catch(function () {});
+    throw error;
   }
-  return { response: response, finalUrl: finalUrl, mime: mime };
 }
 
-function readValidatedImageResponse(validated) {
-  return validated.response.arrayBuffer().then(function (buffer) {
-    if (!buffer || buffer.byteLength > protocol.LIMITS.MAX_IMAGE_BYTES) {
-      throw new Error('image response exceeds size limit');
+async function readValidatedImageResponse(validated) {
+  var body = validated.response.body;
+  if (!body) throw new Error('image response has no body');
+  var reader = body.getReader();
+  var chunks = [];
+  var size = 0;
+  var prefix = new Uint8Array(16);
+  var prefixLength = 0;
+  try {
+    while (true) {
+      var chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > protocol.LIMITS.MAX_IMAGE_BYTES) {
+        throw new Error('image response exceeds size limit');
+      }
+      var take = Math.min(prefix.length - prefixLength, chunk.value.byteLength);
+      prefix.set(chunk.value.subarray(0, take), prefixLength);
+      prefixLength += take;
+      chunks.push(chunk.value);
     }
-    var detectedMime = protocol.detectImageMime(new Uint8Array(buffer));
+    var detectedMime = protocol.detectImageMime(prefix.subarray(0, prefixLength));
     if (!detectedMime || !protocol.isAllowedImageMime(detectedMime)) {
       throw new Error('response bytes are not an approved image format');
     }
-    return readBlobAsDataUrl(new Blob([buffer], { type: detectedMime }));
-  });
+    return await readBlobAsDataUrl(new Blob(chunks, { type: detectedMime }));
+  } catch (error) {
+    try { await reader.cancel(); } catch (_cancelError) {}
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function fetchImageDataUrl(initialValidation, documentUrl) {
@@ -257,6 +281,7 @@ function fetchImageDataUrl(initialValidation, documentUrl) {
       return readValidatedImageResponse(validated);
     }
 
+    if (response.body) response.body.cancel().catch(function () {});
     // A same-origin API may redirect to a CDN. Re-fetch the validated final URL
     // without credentials so CDN responses never depend on ambient cookies.
     return fetch(validated.finalUrl.url, {
@@ -313,10 +338,6 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       nativeRequest.bundleId = String(nativeInput.bundleId || '');
       nativeRequest.targetUrl = nativeSender.url;
     }
-    if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.RECONCILE_IMAGES) {
-      nativeRequest.targetUrl = nativeSender.url;
-      nativeRequest.images = Array.isArray(nativeInput.images) ? nativeInput.images : [];
-    }
     if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.DISCARD) {
       nativeRequest.bundleId = String(nativeInput.bundleId || '');
     }
@@ -358,26 +379,9 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     var localArea = getLocalArea();
     if (!localArea) { sendError(sendResponse, 'storage unavailable'); return false; }
     if (pendingOp === protocol.PENDING_OPS.GET) {
-      localArea.get(PENDING_PASTE_KEY, function (items) {
-        var err = chrome.runtime.lastError;
-        if (err) { sendError(sendResponse, err.message); return; }
-        var value = (items && items[PENDING_PASTE_KEY]) || null;
-        if (value && isPendingPasteExpired(value)) {
-          localArea.remove(PENDING_PASTE_KEY);
-          clearPendingPasteCleanupAlarm();
-          sendResponse({ ok: true, value: null });
-          return;
-        }
-        if (value) {
-          var storedValidation = protocol.validatePendingPayload(value);
-          if (!storedValidation.ok) {
-            localArea.remove(PENDING_PASTE_KEY);
-            sendError(sendResponse, storedValidation.error);
-            return;
-          }
-        }
-        sendResponse({ ok: true, value: value });
-      });
+      queuePendingOperation(function () { return readPendingPaste(localArea); })
+        .then(function (value) { sendResponse({ ok: true, value: value }); })
+        .catch(function (error) { sendError(sendResponse, error.message); });
       return true;
     }
     if (pendingOp === protocol.PENDING_OPS.SET) {
@@ -387,19 +391,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       if (!normalizedPending) { sendError(sendResponse, 'failed to create trusted pending envelope'); return false; }
       var normalizedValidation = protocol.validatePendingPayload(normalizedPending);
       if (!normalizedValidation.ok) { sendError(sendResponse, normalizedValidation.error); return false; }
-      queuePendingPasteWrite(localArea, normalizedPending).then(function () {
+      queuePendingOperation(async function () {
+        var data = {};
+        data[PENDING_PASTE_KEY] = normalizedPending;
+        await localArea.set(data);
         schedulePendingPasteCleanup(normalizedPending);
+      }).then(function () {
         sendResponse({ ok: true, value: normalizedPending });
       }).catch(function (error) {
         sendError(sendResponse, error.message);
-      });
-      return true;
-    }
-    if (pendingOp === protocol.PENDING_OPS.DELETE) {
-      localArea.remove(PENDING_PASTE_KEY, function () {
-        var err = chrome.runtime.lastError;
-        if (!err) clearPendingPasteCleanupAlarm();
-        sendResponse(err ? { ok: false, error: err.message } : { ok: true });
       });
       return true;
     }

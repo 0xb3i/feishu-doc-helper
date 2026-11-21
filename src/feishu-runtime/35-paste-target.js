@@ -159,12 +159,15 @@
   function activateEmptyDocumentBodyForPaste() {
     var ready = getEditorReadyState();
     if (!ready || !ready.hasRootBlock || ready.rootChildCount !== 0) return false;
-    // 空白文档的首行占位层与 `.page-block.root-block` 是同一编辑器容器下的
-    // 兄弟节点，并非 root 的后代，不能用 root.querySelector() 定位。
-    var target = Array.prototype.slice.call(document.querySelectorAll('.first-line-empty')).find(function (node) {
+    // 首行层是正文 root 的兄弟或祖先节点，按所属编辑器定位，不能局限于
+    // root 后代。占位层里的普通文案和 AI 提示只是展示，不决定能否激活正文。
+    var root = getContentRootElement();
+    var container = root && root.closest('.editor-container');
+    if (!container) return false;
+    var target = Array.prototype.slice.call(container.querySelectorAll('.first-line-empty')).find(function (node) {
       return isVisibleElement(node)
-        && !!node.querySelector('.docx-empty-placeholder')
-        && !!node.closest('.editor-container');
+        && node.closest('.editor-container') === container
+        && !node.closest('.page-block-header');
     });
     if (!target) return false;
     try { target.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (error) {}

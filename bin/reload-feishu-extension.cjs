@@ -5,12 +5,8 @@
 // Chrome/Canary CDP session. Build should still succeed if the browser is not
 // open, the extension target is asleep, or Chrome internals change.
 
-const fs = require('fs');
 const http = require('http');
-const path = require('path');
 
-const ROOT = path.resolve(__dirname, '..');
-const MANIFEST = JSON.parse(fs.readFileSync(path.join(ROOT, 'dist/feishu-extension/manifest.json'), 'utf8'));
 const EXTENSION_ID = require('../extension/extension-identity.json').extensionId;
 const PORT = Number(process.env.FEISHU_EXTENSION_CDP_PORT || process.env.CDP_PORT || 9223);
 const HOST = process.env.FEISHU_EXTENSION_CDP_HOST || '127.0.0.1';

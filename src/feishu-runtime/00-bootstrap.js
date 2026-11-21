@@ -83,8 +83,8 @@
     if (!name) return;
     try {
       if (value === null || value === undefined || value === '') {
-        document.documentElement.removeAttribute(name);
-      } else {
+        if (document.documentElement.hasAttribute(name)) document.documentElement.removeAttribute(name);
+      } else if (document.documentElement.getAttribute(name) !== String(value)) {
         document.documentElement.setAttribute(name, String(value));
       }
     } catch (error) {}

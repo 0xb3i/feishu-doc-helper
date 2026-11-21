@@ -907,59 +907,6 @@ class TransferService {
     };
   }
 
-  async reconcileImages(images, targetUrl) {
-    const bindings = Array.isArray(images) ? images : [];
-    if (!bindings.length || bindings.length > 500) throw new Error('图片归位绑定无效');
-    let document = await this.client.fetchDocument(targetUrl);
-    const canonicalTargetUrl = buildCanonicalDocumentUrl(targetUrl, document.document_id);
-    if (typeof this.client.canEditDocument !== 'function'
-      || !await this.client.canEditDocument(String(document.document_id))) {
-      throw new Error('目标文档当前 CLI 身份没有编辑权限');
-    }
-    bindings.forEach(function (binding) {
-      if (!transfer.findExactTextBlock(document.content, binding.marker)) {
-        throw new Error('目标文档缺少图片占位符');
-      }
-      if (!String(document.content || '').includes('id="' + binding.stagingBlockId + '"')) {
-        throw new Error('目标文档缺少已注册的图片暂存块');
-      }
-    });
-
-    for (const binding of bindings) {
-      document = await this.client.fetchDocument(targetUrl);
-      const marker = transfer.findExactTextBlock(document.content, binding.marker);
-      if (!marker) throw new Error('图片归位过程中占位符消失');
-      const tokenNeedle = 'token="' + binding.targetToken + '"';
-      const beforeCount = String(document.content || '').split(tokenNeedle).length - 1;
-      await this.client.updateDocument({
-        documentUrl: canonicalTargetUrl,
-        command: 'block_insert_after',
-        blockId: marker.blockId,
-        revisionId: document.revision_id,
-        content: '<img token="' + binding.targetToken + '"/>',
-      });
-      document = await this.client.fetchDocument(targetUrl);
-      const afterCount = String(document.content || '').split(tokenNeedle).length - 1;
-      if (afterCount <= beforeCount) throw new Error('目标图片块插入后未通过读取校验');
-      await this.client.updateDocument({
-        documentUrl: canonicalTargetUrl,
-        command: 'block_delete',
-        blockId: marker.blockId + ',' + binding.stagingBlockId,
-        revisionId: document.revision_id,
-      });
-    }
-
-    document = await this.client.fetchDocument(targetUrl);
-    bindings.forEach(function (binding) {
-      if (transfer.findExactTextBlock(document.content, binding.marker)
-        || String(document.content || '').includes('id="' + binding.stagingBlockId + '"')
-        || !String(document.content || '').includes('token="' + binding.targetToken + '"')) {
-        throw new Error('图片归位后的最终结构校验失败');
-      }
-    });
-    return { status: 'complete', imageCount: bindings.length };
-  }
-
 }
 
 module.exports = {

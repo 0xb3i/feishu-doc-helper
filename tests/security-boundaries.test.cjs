@@ -98,6 +98,15 @@ test('clipboard bridge accepts only bounded paste payloads', () => {
   }).ok, false);
 });
 
+test('clipboard image transfer uses the same decoded image limit as extraction', () => {
+  const imageDataUrl = 'data:image/png;base64,' + Buffer.alloc(9 * 1024 * 1024).toString('base64');
+  assert.equal(protocol.validatePendingPayload(makePendingV2({ orderedImageBase64List: [{ token: 'large_image', base64: imageDataUrl }] })).ok, true);
+  assert.equal(protocol.validateClipboardBridgePayload({ imageDataUrl, pasteAfterWrite: true }).ok, true);
+  assert.equal(protocol.validateClipboardBridgePayload({ imageDataUrl, text: 'cannot mix', pasteAfterWrite: true }).ok, false);
+  const tooLarge = 'data:image/png;base64,' + Buffer.alloc(protocol.LIMITS.MAX_IMAGE_BYTES + 1).toString('base64');
+  assert.equal(protocol.validateClipboardBridgePayload({ imageDataUrl: tooLarge, pasteAfterWrite: false }).ok, false);
+});
+
 test('pending whiteboard transfer accepts only bounded official PageDetail data', () => {
   const validTransfer = makeWhiteboardTransfer();
   assert.equal(protocol.validateWhiteboardTransfer(validTransfer).ok, true);

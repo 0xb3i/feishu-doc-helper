@@ -40,6 +40,43 @@ test('bounded map preserves input order and never exceeds its concurrency', asyn
   assert.equal(maxActive, 2);
 });
 
+test('bounded map rejects falsy errors, stops queued work, and drains active workers', async () => {
+  for (const reason of [undefined, null, false, 0, '']) {
+    const api = loadRuntime();
+    const started = [];
+    let secondFinished = false;
+    let rejected = false;
+    try {
+      await api.mapWithConcurrency([0, 1, 2, 3], 2, async (value) => {
+        started.push(value);
+        if (value === 0) throw reason;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        secondFinished = true;
+      });
+    } catch (error) {
+      rejected = true;
+      assert.equal(error, reason);
+    }
+    assert.equal(rejected, true);
+    assert.equal(secondFinished, true);
+    assert.deepEqual(started, [0, 1]);
+  }
+});
+
+test('virtual scan can finish at the first viewport of an arbitrarily long document', async () => {
+  const api = loadRuntime();
+  let captures = 0;
+  await api.scanVirtualScroller({
+    scroller: { scrollTop: 0, dispatchEvent() {} },
+    maxScrollTop: Number.MAX_SAFE_INTEGER,
+    step: 1,
+    passes: 2,
+    captureMissing() { captures += 1; },
+    isComplete() { return captures > 0; },
+  });
+  assert.equal(captures, 1);
+});
+
 test('virtual scan stops after the first sample that satisfies caller completeness', async () => {
   const delays = [];
   const scrollPositions = [];

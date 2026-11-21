@@ -63,26 +63,18 @@
     });
   }
 
-  function getExtensionPendingPaste() {
-    return requestExtensionPendingPaste('get').then(function (data) {
-      if (data === null || data === undefined) return null;
-      var cloned = clonePendingPasteData(data);
-      if (!cloned) throw createPendingPasteStorageError('get', '缓存数据格式无效');
-      return cloned;
-    });
-  }
-
-  function setExtensionPendingPaste(data) {
-    var cloned = clonePendingPasteData(data);
-    if (!cloned) return Promise.reject(createPendingPasteStorageError('set', '缓存数据无法序列化'));
-    return requestExtensionPendingPaste('set', cloned).then(function (stored) {
-      return clonePendingPasteData(stored) || cloned;
-    });
+  function validatePendingPasteResponse(data, op) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw createPendingPasteStorageError(op, '缓存数据格式无效');
+    }
+    // The extension message/storage boundary already returns an independent
+    // object. Copying the full image payload again here only multiplies memory.
+    return data;
   }
 
   function getPendingPaste() {
-    return getExtensionPendingPaste().then(function (pendingPaste) {
-      return pendingPaste || null;
+    return requestExtensionPendingPaste('get').then(function (data) {
+      return data == null ? null : validatePendingPasteResponse(data, 'get');
     });
   }
 
@@ -99,7 +91,8 @@
     pendingPaste.ts = Date.now();
     pendingPaste.savedFromHost = location.host;
     pendingPaste.savedFromHref = location.href;
-    return setExtensionPendingPaste(pendingPaste).then(function (storedPending) {
+    return requestExtensionPendingPaste('set', pendingPaste).then(function (stored) {
+      var storedPending = validatePendingPasteResponse(stored, 'set');
       setDocAttr('data-feishu-pending-paste-ts', String(storedPending.ts || pendingPaste.ts));
       return storedPending;
     });

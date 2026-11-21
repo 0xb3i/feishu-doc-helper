@@ -139,13 +139,11 @@
     menu.style.top = top + 'px';
     imageContextMenuEl = menu;
 
-    setTimeout(function () {
-      document.addEventListener('mousedown', onImageContextMenuOutside, true);
-      document.addEventListener('wheel', closeImageContextMenu, true);
-      document.addEventListener('touchmove', closeImageContextMenu, true);
-      window.addEventListener('click', onImageContextMenuClick, true);
-      window.addEventListener('keydown', onImageContextMenuKeydown, true);
-    }, 0);
+    document.addEventListener('mousedown', onImageContextMenuOutside, true);
+    document.addEventListener('wheel', closeImageContextMenu, true);
+    document.addEventListener('touchmove', closeImageContextMenu, true);
+    window.addEventListener('click', onImageContextMenuClick, true);
+    window.addEventListener('keydown', onImageContextMenuKeydown, true);
   }
 
   registerDisposer(closeImageContextMenu);

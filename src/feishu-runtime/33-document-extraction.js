@@ -12,7 +12,6 @@
   }
   function buildSemanticSnapshotForRoot(rootBlock, surface) {
     var primary = snapshotCollector.collectFromStructService(rootBlock, {
-      calloutStyleResolver: extractCalloutStyleFromDOM,
       getDocument: function () { return document; },
     });
     var fallback = snapshotCollector.collectFromDom(surface);
@@ -72,7 +71,10 @@
         docxRecord: '',
       };
     }
-    var docxRecordPayload = renderer.buildDocxRecordPayload(renderRoot, { maxDepth: renderMaxDepth });
+    var docxRecordPayload = renderer.buildDocxRecordPayload(renderRoot, {
+      maxDepth: renderMaxDepth,
+      calloutStyleResolver: extractCalloutStyleFromDOM,
+    });
     var docxRecordRaw = docxRecordPayload ? JSON.stringify(docxRecordPayload) : '';
     var content = {
       html: finalHtml,

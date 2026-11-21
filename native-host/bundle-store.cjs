@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const transfer = require('../lib/feishu-whiteboard-transfer.cjs');
+const LOCK_STALE_AFTER_MS = 10 * 60 * 1000;
 
 function ensureInside(parent, candidate) {
   const root = path.resolve(parent) + path.sep;
@@ -15,16 +16,75 @@ function ensureInside(parent, candidate) {
 }
 
 function writeJsonAtomic(filePath, value) {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Bundle directories are created exactly once by create(). A delayed writer
+  // must fail after discard, never resurrect a partially deleted bundle.
   const tempPath = filePath + '.tmp-' + process.pid + '-' + crypto.randomBytes(6).toString('hex');
-  fs.writeFileSync(tempPath, JSON.stringify(value), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  fs.renameSync(tempPath, filePath);
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(value), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
 }
 
 function readJson(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
   return JSON.parse(raw);
+}
+
+function isProcessAlive(pid) {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (error) {
+    return !!(error && error.code === 'EPERM');
+  }
+}
+
+function isTargetLockActive(lockPath, now) {
+  let owner = null;
+  try { owner = readJson(path.join(lockPath, 'owner')); } catch (error) {}
+  if (owner) {
+    const heartbeatAt = Number(owner.heartbeatAt || owner.createdAt || 0);
+    return heartbeatAt >= now - LOCK_STALE_AFTER_MS || isProcessAlive(owner.pid);
+  }
+  try { return fs.statSync(lockPath).mtimeMs >= now - LOCK_STALE_AFTER_MS; }
+  catch (error) {
+    if (error && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function bundleBusyError() {
+  const error = new Error('画板迁移正在执行或本地迁移状态正在更新，请稍后重试；若上次进程已中断，请重新提取源文档');
+  error.code = 'FEISHU_BUNDLE_BUSY';
+  return error;
+}
+
+function readLifecycleOwner(lockPath) {
+  try { return fs.readlinkSync(lockPath); }
+  catch (error) {
+    if (error && error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function withBundleLifecycleLock(bundleDir, callback) {
+  const lockPath = path.join(bundleDir, '.lifecycle.lock');
+  const owner = process.pid + '-' + crypto.randomBytes(16).toString('hex');
+  // A symlink atomically publishes both exclusion and ownership. Unlike a
+  // mkdir + owner-file pair it cannot leave a half-written owner on a crash.
+  try { fs.symlinkSync(owner, lockPath); }
+  catch (error) {
+    if (error && error.code === 'EEXIST') throw bundleBusyError();
+    throw error;
+  }
+  try { return callback(); }
+  finally {
+    if (readLifecycleOwner(lockPath) === owner) fs.unlinkSync(lockPath);
+  }
 }
 
 class BundleStore {
@@ -67,7 +127,7 @@ class BundleStore {
     }
     const expiresAt = Number(bundle.expiresAt);
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
-      this.discard(bundleId);
+      if (!this.hasActiveTargetLock(bundleId)) this.discard(bundleId);
       throw new Error('本地画板迁移包已过期，请重新提取源文档');
     }
     return bundle;
@@ -105,7 +165,6 @@ class BundleStore {
     const ownerId = crypto.randomBytes(16).toString('hex');
     const ownerPath = path.join(lockPath, 'owner');
     const heartbeatIntervalMs = 30000;
-    const staleAfterMs = 10 * 60 * 1000;
 
     function ownerRecord(createdAt) {
       return { ownerId: ownerId, pid: process.pid, createdAt: createdAt, heartbeatAt: Date.now() };
@@ -113,17 +172,11 @@ class BundleStore {
 
     function acquire() {
       fs.mkdirSync(lockPath, { mode: 0o700 });
-      writeJsonAtomic(ownerPath, ownerRecord(Date.now()));
-    }
-
-    function isProcessAlive(pid) {
-      const value = Number(pid);
-      if (!Number.isInteger(value) || value <= 0) return false;
       try {
-        process.kill(value, 0);
-        return true;
+        writeJsonAtomic(ownerPath, ownerRecord(Date.now()));
       } catch (error) {
-        return !!(error && error.code === 'EPERM');
+        fs.rmSync(lockPath, { recursive: true, force: true });
+        throw error;
       }
     }
 
@@ -136,31 +189,19 @@ class BundleStore {
       const current = readCurrentOwner();
       if (current && current.ownerId === ownerId) fs.rmSync(lockPath, { recursive: true, force: true });
     }
-    try {
-      acquire();
-    } catch (error) {
-      let stale = false;
-      const owner = readCurrentOwner();
-      if (owner) {
-        const heartbeatAt = Number(owner && (owner.heartbeatAt || owner.createdAt) || 0);
-        stale = heartbeatAt < Date.now() - staleAfterMs && !isProcessAlive(owner && owner.pid);
-      } else {
-        try { stale = fs.statSync(lockPath).mtimeMs < Date.now() - staleAfterMs; }
-        catch (statError) { stale = false; }
-      }
-      if (!stale) throw new Error('同一目标文档已有画板迁移正在执行，请稍后重试');
-      const quarantinePath = lockPath + '.stale-' + ownerId;
-      try {
-        fs.renameSync(lockPath, quarantinePath);
-      } catch (renameError) {
-        throw new Error('同一目标文档的迁移锁状态已变化，请稍后重试');
-      }
+    withBundleLifecycleLock(this.bundleDir(bundleId), function () {
       try {
         acquire();
-      } finally {
-        fs.rmSync(quarantinePath, { recursive: true, force: true });
+      } catch (error) {
+        if (!error || error.code !== 'EEXIST') throw error;
+        if (isTargetLockActive(lockPath, Date.now())) {
+          throw new Error('同一目标文档已有画板迁移正在执行，请稍后重试');
+        }
+        // No competing acquisition or bundle deletion can run under the gate.
+        fs.rmSync(lockPath, { recursive: true, force: true });
+        acquire();
       }
-    }
+    });
 
     const createdAt = Date.now();
     const heartbeat = setInterval(function () {
@@ -176,15 +217,57 @@ class BundleStore {
     });
   }
 
-  discard(bundleId) {
+  hasActiveTargetLock(bundleId, now = Date.now()) {
+    const targetsDir = path.join(this.bundleDir(bundleId), 'targets');
+    let entries;
+    try { entries = fs.readdirSync(targetsDir, { withFileTypes: true }); }
+    catch (error) {
+      if (error && error.code === 'ENOENT') return false;
+      throw error;
+    }
+    return entries.some(function (entry) {
+      return entry.isDirectory() && entry.name.endsWith('.lock')
+        && isTargetLockActive(path.join(targetsDir, entry.name), now);
+    });
+  }
+
+  discard(bundleId, now = Date.now()) {
     const dir = this.bundleDir(bundleId);
-    fs.rmSync(dir, { recursive: true, force: true });
+    const retiredDir = path.join(this.bundleRoot, '.discarded-' + bundleId + '-' + crypto.randomBytes(8).toString('hex'));
+    const retire = () => {
+      if (this.hasActiveTargetLock(bundleId, now)) throw bundleBusyError();
+      // Move the gate with the bundle. New acquisitions then fail with ENOENT
+      // instead of slipping in while recursive deletion removes its children.
+      fs.renameSync(dir, retiredDir);
+    };
+    try {
+      withBundleLifecycleLock(dir, retire);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return;
+      if (!error || error.code !== 'FEISHU_BUNDLE_BUSY') throw error;
+      const owner = readLifecycleOwner(path.join(dir, '.lifecycle.lock'));
+      const match = owner && owner.match(/^([0-9]+)-[a-f0-9]{32}$/);
+      if (!match || isProcessAlive(Number(match[1]))) throw error;
+      // Never steal a crashed gate for further writes. Its immutable marker
+      // blocks all new writers while we retire the whole abandoned bundle.
+      try { retire(); }
+      catch (retireError) {
+        if (!retireError || retireError.code !== 'ENOENT') throw retireError;
+      }
+    }
+    fs.rmSync(retiredDir, { recursive: true, force: true });
   }
 
   cleanupExpired(now) {
     const currentTime = Number.isFinite(Number(now)) ? Number(now) : Date.now();
     const entries = fs.readdirSync(this.bundleRoot, { withFileTypes: true });
     entries.forEach((entry) => {
+      // A process may stop after retirement but before recursive removal.
+      // These directories are unreachable to writers and contain no live lease.
+      if (entry.isDirectory() && /^\.discarded-[a-f0-9]{64}-[a-f0-9]{16}$/.test(entry.name)) {
+        fs.rmSync(path.join(this.bundleRoot, entry.name), { recursive: true, force: true });
+        return;
+      }
       if (!entry.isDirectory() || !transfer.BUNDLE_ID_RE.test(entry.name)) return;
       const dir = this.bundleDir(entry.name);
       const filePath = path.join(dir, 'bundle.json');
@@ -195,31 +278,10 @@ class BundleStore {
         catch (statError) { expiresAt = 0; }
       }
       if (!Number.isFinite(expiresAt) || expiresAt <= currentTime) {
-        const targetsDir = path.join(dir, 'targets');
-        let hasActiveLock = false;
-        try {
-          const locks = fs.readdirSync(targetsDir, { withFileTypes: true })
-            .filter((item) => item.isDirectory() && item.name.endsWith('.lock'));
-          hasActiveLock = locks.some(function (lock) {
-            const lockDir = path.join(targetsDir, lock.name);
-            let owner = null;
-            try { owner = readJson(path.join(lockDir, 'owner')); } catch (error) {}
-            const heartbeatAt = Number(owner && (owner.heartbeatAt || owner.createdAt) || 0);
-            if (heartbeatAt >= currentTime - 10 * 60 * 1000) return true;
-            const pid = Number(owner && owner.pid);
-            if (Number.isInteger(pid) && pid > 0) {
-              try { process.kill(pid, 0); return true; }
-              catch (error) { if (error && error.code === 'EPERM') return true; }
-            }
-            if (!owner) {
-              try { return fs.statSync(lockDir).mtimeMs >= currentTime - 10 * 60 * 1000; }
-              catch (error) { return false; }
-            }
-            return false;
-          });
-        } catch (error) {}
-        if (hasActiveLock) return;
-        fs.rmSync(dir, { recursive: true, force: true });
+        try { this.discard(entry.name, currentTime); }
+        catch (error) {
+          if (!error || error.code !== 'FEISHU_BUNDLE_BUSY') throw error;
+        }
       }
     });
   }

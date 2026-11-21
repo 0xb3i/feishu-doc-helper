@@ -46,31 +46,15 @@
         });
       }
 
-      // Fallback: when we have base64 but couldn't tie them to a record
-      // (e.g. DOM-only fallback), still surface the tokens for injection.
-      if (!orderedImageBase64List.length && Object.keys(tokenToBase64).length) {
-        Object.keys(tokenToBase64).forEach(function (token) {
-          orderedImageBase64List.push({
-            token: token,
-            base64: tokenToBase64[token],
-            width: 0,
-            height: 0,
-          });
-        });
-      }
-
       var missingImages = orderedImageBase64List.filter(function (img) { return !img.base64; });
       if (missingImages.length) {
         throw new Error('图片预处理不完整：' + missingImages.length + ' 张图片未能读取，请重试提取');
       }
-      var hasImages = orderedImageBase64List.length > 0;
       return {
         text: text,
         html: sanitizer.buildClipboardHtml(htmlWithImages, false),
         docxRecord: docxRecordObj ? JSON.stringify(docxRecordObj) : '',
         hasDowngradedImages: false,
-        hasImagesToInject: hasImages,
-        hasImagesToUpload: hasImages,
         orderedImageBase64List: orderedImageBase64List,
       };
     });

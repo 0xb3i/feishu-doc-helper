@@ -101,8 +101,14 @@ function discoverLarkCli(explicitPath) {
     const nativePath = path.resolve(path.dirname(resolved), '..', 'bin', nativeName);
     if (fs.existsSync(nativePath)) return fs.realpathSync(nativePath);
   }
-  const header = fs.readFileSync(resolved).subarray(0, 2).toString('utf8');
-  if (header === '#!') {
+  const descriptor = fs.openSync(resolved, 'r');
+  const header = Buffer.alloc(2);
+  try {
+    fs.readSync(descriptor, header, 0, header.length, 0);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (header.toString('utf8') === '#!') {
     throw new Error('lark-cli 路径仍是脚本包装器；请通过 --lark-cli 指向安装包 bin/lark-cli 原生可执行文件');
   }
   return resolved;
@@ -180,9 +186,13 @@ function mergeRules(existingRules, incomingRules) {
 function writeAtomic(targetPath, contents, mode) {
   fs.mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
   const tempPath = targetPath + '.tmp-' + process.pid + '-' + crypto.randomBytes(4).toString('hex');
-  fs.writeFileSync(tempPath, contents, { mode: mode, flag: 'wx' });
-  fs.chmodSync(tempPath, mode);
-  fs.renameSync(tempPath, targetPath);
+  try {
+    fs.writeFileSync(tempPath, contents, { mode: mode, flag: 'wx' });
+    fs.chmodSync(tempPath, mode);
+    fs.renameSync(tempPath, targetPath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
 }
 
 function writeJsonAtomic(targetPath, value, mode) {

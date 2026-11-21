@@ -11,56 +11,56 @@
   // 深层表格或折叠区域里未出现在 HTML 片段中的图片也进入同一转换队列，
   // 因此进度总数与结构化图片统计始终使用同一口径。
   function convertImagesToBase64(html, imageEntries, preloadedTokenToBase64) {
-    var imgUrls = [];
-    var tokenToBase64 = {};
-    Object.keys(preloadedTokenToBase64 || {}).forEach(function (token) {
-      var dataUrl = preloadedTokenToBase64[token];
-      if (/^data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}$/.test(String(dataUrl || ''))) {
-        tokenToBase64[token] = dataUrl;
-      }
-    });
-    var urlRegex = /src="(https?:\/\/[^"]+?(?:\/space\/api\/box\/stream\/download\/(?:preview\/|v2\/cover\/|all\/)|(?:feishucdn\.com\/static-resource\/v1\/))([A-Za-z0-9_.~-]+)[^"]*)"/g;
-    var match;
-    while ((match = urlRegex.exec(html)) !== null) {
-      imgUrls.push({ url: match[1], full: match[0], token: match[2] });
-    }
-    var htmlItemsByToken = Object.create(null);
-    imgUrls.forEach(function (item) {
-      if (!htmlItemsByToken[item.token]) htmlItemsByToken[item.token] = [];
-      htmlItemsByToken[item.token].push(item);
-    });
-
+    var sourceHtml = String(html || '');
+    var tokenToBase64 = Object.create(null);
     var groupsByToken = Object.create(null);
     var workItems = [];
-    function addWorkItem(token) {
-      var cleanToken = String(token || '');
-      if (!cleanToken) return;
-      var group = groupsByToken[cleanToken];
+    (Array.isArray(imageEntries) ? imageEntries : []).forEach(function (entry) {
+      var token = String(entry && entry.image ? entry.image.token || '' : entry && entry.token || '');
+      if (!token) return;
+      var group = groupsByToken[token];
       if (!group) {
-        group = { token: cleanToken, count: 0, urls: [], htmlItems: htmlItemsByToken[cleanToken] || [] };
-        groupsByToken[cleanToken] = group;
+        group = { token: token, count: 0, urls: new Set() };
+        groupsByToken[token] = group;
         workItems.push(group);
       }
       group.count += 1;
+    });
+    if (!workItems.length) return Promise.resolve({ html: sourceHtml, tokenToBase64: {} });
+
+    // URL 只给已有结构化记录提供下载地址，不能反向扩充图片清单。
+    // 保存属性位置，下载结束后一次拼接 HTML，避免每张图重扫整篇文档。
+    var htmlImages = [];
+    var srcRegex = /(<img\b[^>]*?\s)src\s*=\s*(["'])(.*?)\2/gi;
+    var match;
+    while ((match = srcRegex.exec(sourceHtml)) !== null) {
+      var url;
+      try { url = new URL(match[3].replace(/&amp;/gi, '&'), location.origin); }
+      catch (error) { continue; }
+      if (!/^https?:$/.test(url.protocol)) continue;
+      var pathMatch = url.pathname.match(/\/space\/api\/box\/stream\/download\/(?:preview|v2\/cover)\/([A-Za-z0-9_.~-]+)/);
+      var token = pathMatch ? pathMatch[1] : '';
+      if (/\/space\/api\/box\/stream\/download\/all\/?$/.test(url.pathname)) {
+        token = url.searchParams.get('token') || '';
+      } else if (!token && /(^|\.)feishucdn\.com$/.test(url.hostname)) {
+        pathMatch = url.pathname.match(/^\/static-resource\/v1\/([A-Za-z0-9_.~-]+)/);
+        token = pathMatch ? pathMatch[1] : '';
+      }
+      var group = groupsByToken[token];
+      if (!group) continue;
+      group.urls.add(url.href);
+      htmlImages.push({ token: token, start: match.index + match[1].length,
+        end: match.index + match[0].length });
     }
 
-    var structuredEntries = Array.isArray(imageEntries) ? imageEntries : [];
-    structuredEntries.forEach(function (entry) {
-      addWorkItem(entry && entry.image ? entry.image.token : entry && entry.token);
-    });
-    if (!workItems.length) imgUrls.forEach(function (item) { addWorkItem(item.token); });
-    if (!workItems.length) return Promise.resolve({ html: html, tokenToBase64: {} });
-
     workItems.forEach(function (group) {
-      group.htmlItems.forEach(function (item) {
-        if (group.urls.indexOf(item.url) === -1) group.urls.push(item.url);
-      });
-      [
-        location.origin + '/space/api/box/stream/download/all/?token=' + encodeURIComponent(group.token),
-        location.origin + '/space/api/box/stream/download/preview/' + encodeURIComponent(group.token) + '/?preview_type=16',
-      ].forEach(function (url) {
-        if (group.urls.indexOf(url) === -1) group.urls.push(url);
-      });
+      group.urls.add(location.origin + '/space/api/box/stream/download/all/?token=' + encodeURIComponent(group.token));
+      group.urls.add(location.origin + '/space/api/box/stream/download/preview/' + encodeURIComponent(group.token) + '/?preview_type=16');
+      group.urls = Array.from(group.urls);
+      var preloaded = preloadedTokenToBase64 && preloadedTokenToBase64[group.token];
+      if (/^data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}$/.test(String(preloaded || ''))) {
+        tokenToBase64[group.token] = preloaded;
+      }
     });
 
     var done = 0;
@@ -72,8 +72,6 @@
     var progressLabel = embeddedChartTotal > 0
       ? '转换资源（' + imageTotal + ' 图片 + ' + embeddedChartTotal + ' 图表）'
       : '转换图片';
-    var nextIndex = 0;
-    var concurrency = Math.min(5, workItems.length);
     showToast('📷 转换图片中 0/' + total);
     emitUiProgress({ phase: 'convert', done: 0, total: total, label: progressLabel });
 
@@ -82,12 +80,7 @@
         done += group.count;
         showToast('📷 转换图片中 ' + done + '/' + total);
         emitUiProgress({ phase: 'convert', done: done, total: total, label: progressLabel });
-        if (base64) {
-          group.htmlItems.forEach(function (item) {
-            html = html.replace(item.full, 'src="' + IMAGE_PLACEHOLDER_SRC + '"');
-          });
-          tokenToBase64[group.token] = base64;
-        }
+        if (base64) tokenToBase64[group.token] = base64;
       }
       function tryFetch(index) {
         if (index >= group.urls.length) return Promise.resolve(null);
@@ -102,177 +95,34 @@
       return tryFetch(0).then(finish);
     }
 
-    function worker() {
-      if (nextIndex >= workItems.length) return Promise.resolve();
-      var item = workItems[nextIndex];
-      nextIndex += 1;
-      return convertOne(item).then(worker);
-    }
-
-    var workers = [];
-    for (var i = 0; i < concurrency; i++) workers.push(worker());
-
-    return Promise.all(workers).then(function () { return { html: html, tokenToBase64: tokenToBase64 }; });
-  }
-
-  // ── Image upload via Feishu internal API ───────────────────────────────────
-
-  function discoverWikiObjToken(docToken) {
-    return pageFetch(
-      '/space/api/wiki/v2/tree/get_node/?wiki_token=' + encodeURIComponent(docToken)
-        + '&expand_shortcut=true&with_deleted=true',
-      { credentials: 'include' }
-    )
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        var node = (data && data.data && data.data.node) || (data && data.data) || {};
-        return node.obj_token || '';
-      })
-      .catch(function () { return ''; });
-  }
-
-  function resolveTargetDocToken() {
-    var docToken = '';
-    var isWiki = false;
-    try {
-      var match = location.pathname.match(/\/(docx|wiki|doc)\/([A-Za-z0-9]+)/);
-      if (match) {
-        isWiki = match[1] === 'wiki';
-        docToken = match[2];
-      }
-    } catch (e) {}
-    if (isWiki && docToken) {
-      return discoverWikiObjToken(docToken).then(function (objToken) {
-        return objToken || docToken;
+    return mapWithConcurrency(workItems, 5, convertOne).then(function () {
+      var parts = [];
+      var position = 0;
+      htmlImages.forEach(function (item) {
+        if (!tokenToBase64[item.token]) return;
+        parts.push(sourceHtml.slice(position, item.start), 'src="' + IMAGE_PLACEHOLDER_SRC + '"');
+        position = item.end;
       });
-    }
-    return Promise.resolve(docToken);
-  }
-
-  function uploadBase64ImageViaApi(base64Data, objToken) {
-    var dataUrl = String(base64Data || '').indexOf('data:') === 0
-      ? base64Data
-      : 'data:image/png;base64,' + base64Data;
-    var base64Part = dataUrl.split(',')[1] || '';
-    var mimeMatch = dataUrl.match(/data:(image\/\w+);/);
-    var mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
-    var ext = mimeType.split('/')[1] || 'png';
-
-    var byteString = atob(base64Part);
-    var ab = new ArrayBuffer(byteString.length);
-    var ia = new Uint8Array(ab);
-    for (var i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
-    var blob = new Blob([ab], { type: mimeType });
-    var fileName = 'image.' + ext;
-    var fileSize = blob.size;
-
-    var url = '/space/api/box/stream/upload/all/?name=' + encodeURIComponent(fileName)
-      + '&size=' + fileSize
-      + '&mount_point=docx_image'
-      + '&mount_node_token=' + encodeURIComponent(objToken || '')
-      + '&push_open_history_record=0';
-
-    var formData = new FormData();
-    formData.append('file', blob, fileName);
-
-    return pageFetch(url, {
-      method: 'POST',
-      body: formData,
-      credentials: 'include',
-      headers: { 'biz-ua-type': 'Web', 'biz-scene': 'file_upload' },
-    })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        var token = '';
-        if (data && data.data) token = data.data.token || data.data.file_token || data.data.image_key || '';
-        if (!token && data && data.result) token = data.result.token || data.result.file_token || data.result.image_key || '';
-        return { token: token };
-      })
-      .catch(function (err) { return { token: '', error: stringifyError(err) }; });
-  }
-
-  function uploadAllImages(orderedImageBase64List) {
-    var images = orderedImageBase64List || [];
-    if (!images.length) {
-      return Promise.resolve({ tokenMap: {}, attemptedCount: 0, uploadedCount: 0, failedCount: 0 });
-    }
-
-    return resolveTargetDocToken().then(function (objToken) {
-      var tokenMap = {};
-      var uploadedCount = 0;
-      var failedCount = 0;
-      var processedCount = 0;
-      var nextIndex = 0;
-      var concurrency = Math.min(4, images.length);
-
-      emitUiProgress({ phase: 'upload', done: 0, total: images.length, label: '上传图片' });
-
-      function uploadOne(img) {
-        return Promise.resolve().then(function () {
-          if (!img.base64) return { token: '', error: 'no base64 data' };
-          return uploadBase64ImageViaApi(img.base64, objToken);
-        }).then(function (result) {
-          if (result && result.token) {
-            tokenMap[img.token] = result.token;
-            uploadedCount += 1;
-          } else {
-            failedCount += 1;
-          }
-        }).catch(function () { failedCount += 1; }).then(function () {
-          processedCount += 1;
-          emitUiProgress({ phase: 'upload', done: processedCount, total: images.length, label: '上传图片' });
-        });
-
-      }
-
-      function worker() {
-        if (nextIndex >= images.length) return Promise.resolve();
-        var img = images[nextIndex];
-        nextIndex += 1;
-        return uploadOne(img).then(worker);
-      }
-
-      var workers = [];
-      for (var i = 0; i < concurrency; i++) workers.push(worker());
-
-      return Promise.all(workers).then(function () {
-        return {
-          tokenMap: tokenMap,
-          attemptedCount: images.length,
-          uploadedCount: uploadedCount,
-          failedCount: failedCount,
-        };
-      });
+      parts.push(sourceHtml.slice(position));
+      return { html: parts.join(''), tokenToBase64: tokenToBase64 };
     });
   }
 
   function collectDocumentImageRecords(rootBlock) {
     var records = [];
-    function visit(block) {
-      if (!block || typeof block !== 'object') return;
+    var pending = [rootBlock];
+    var visited = new Set();
+    while (pending.length) {
+      var block = pending.pop();
+      if (!block || typeof block !== 'object' || visited.has(block)) continue;
+      visited.add(block);
       var record = block.record;
       var snapshot = record && record.snapshot;
-      if (record && snapshot && snapshot.type === 'image' && snapshot.image) {
-        records.push({
-          viewId: block.id,
-          recordId: String(record.id || ''),
-          snapshot: snapshot,
-        });
-      }
-      (block.children || []).forEach(visit);
+      if (record && snapshot && snapshot.type === 'image' && snapshot.image) records.push(record);
+      var children = block.children || [];
+      for (var i = children.length - 1; i >= 0; i--) pending.push(children[i]);
     }
-    visit(rootBlock);
     return records;
-  }
-
-  function snapshotDocumentImageRecordIds() {
-    var editorAPI = getEditorAPI();
-    var rootBlock = editorAPI && editorAPI.structService && editorAPI.structService.rootBlock;
-    var ids = {};
-    collectDocumentImageRecords(rootBlock).forEach(function (record) {
-      if (record.recordId) ids[record.recordId] = true;
-    });
-    return ids;
   }
 
   function buildImagePasteDescriptors(images) {
@@ -427,40 +277,6 @@
       });
   }
 
-  function waitForNativeImagePaste(editorAPI, marker, previousImageIds, timeoutMs) {
-    var deadline = Date.now() + Math.max(2000, Number(timeoutMs || 15000));
-    return new Promise(function (resolve, reject) {
-      function check() {
-        var markerStillExists = !!findImageMarkerBlocks(editorAPI.structService.rootBlock, [{ marker: marker }])[marker];
-        var images = collectDocumentImageRecords(editorAPI.structService.rootBlock).filter(function (record) {
-          return !previousImageIds[record.recordId];
-        });
-        var ready = images.find(function (record) {
-          return !!String(record.snapshot.image && record.snapshot.image.token || '');
-        });
-        if (!markerStillExists && ready) { resolve(ready); return; }
-        if (Date.now() >= deadline) { reject(new Error('图片槽位原生粘贴未完成')); return; }
-        setTimeout(check, 120);
-      }
-      check();
-    });
-  }
-
-  function waitForCompleteImageMarkers(editorAPI, descriptors, timeoutMs) {
-    var deadline = Date.now() + Math.max(2000, Number(timeoutMs || 10000));
-    return new Promise(function (resolve, reject) {
-      function check() {
-        try {
-          var markers = findImageMarkerBlocks(editorAPI.structService.rootBlock, descriptors);
-          if (Object.keys(markers).length === descriptors.length) { resolve(markers); return; }
-        } catch (error) { reject(error); return; }
-        if (Date.now() >= deadline) { reject(new Error('目标文档图片槽位数量不完整')); return; }
-        setTimeout(check, 120);
-      }
-      check();
-    });
-  }
-
   function getDocumentScrollViewport() {
     var root = getValidationSurfaceElement();
     var candidates = [];
@@ -586,53 +402,36 @@
     });
   }
 
-  function waitForRenderedImageMarkerRemoval(marker, timeoutMs) {
-    var deadline = Date.now() + Math.max(2000, Number(timeoutMs || 12000));
-    return new Promise(function (resolve, reject) {
-      function check() {
-        if (!findRenderedImageMarker(marker)) { resolve(); return; }
-        if (Date.now() >= deadline) { reject(new Error('图片槽位原生粘贴未完成')); return; }
-        setTimeout(check, 120);
-      }
-      check();
-    });
-  }
-
-  function snapshotRenderedImageIds() {
-    var ids = {};
-    Array.prototype.forEach.call(document.querySelectorAll('[data-block-type="image"]'), function (block) {
-      var id = String(block.getAttribute('data-record-id') || block.getAttribute('data-block-id') || '');
-      if (id) ids[id] = true;
+  function snapshotRegisteredImageIds() {
+    var editorAPI = getEditorAPI();
+    var recordMap = editorAPI && editorAPI.dataService && editorAPI.dataService.getRecordMap();
+    if (!recordMap) throw new Error('当前页面未加载可编辑文档数据服务');
+    var ids = new Set();
+    recordMap.forEach(function (record) {
+      if (record && record.snapshot && record.snapshot.type === 'image') ids.add(String(record.id));
     });
     return ids;
   }
 
-  function waitForRenderedImageInsertion(previousIds, timeoutMs) {
-    var deadline = Date.now() + Math.max(2000, Number(timeoutMs || 12000));
+  function waitForRegisteredImageInsertion(previousIds, timeoutMs) {
+    var deadline = Date.now() + Math.max(2000, Number(timeoutMs || 60000));
     return new Promise(function (resolve, reject) {
       function check() {
-        var blocks = document.querySelectorAll('[data-block-type="image"]');
-        for (var i = 0; i < blocks.length; i++) {
-          var id = String(blocks[i].getAttribute('data-record-id') || blocks[i].getAttribute('data-block-id') || '');
-          if (id && !previousIds[id]) { resolve(id); return; }
-        }
-        if (Date.now() >= deadline) { reject(new Error('图片原生粘贴未生成图片块')); return; }
-        setTimeout(check, 120);
-      }
-      check();
-    });
-  }
-
-  function waitForRenderedImageToken(recordId, timeoutMs) {
-    var deadline = Date.now() + Math.max(2000, Number(timeoutMs || 12000));
-    return new Promise(function (resolve, reject) {
-      function check() {
-        var block = document.querySelector('[data-block-type="image"][data-record-id="' + recordId + '"]');
-        var tokenNode = block && block.querySelector('[image-token]');
-        var token = String(tokenNode && tokenNode.getAttribute('image-token') || '');
-        if (token) { resolve(token); return; }
-        if (Date.now() >= deadline) { reject(new Error('图片资源注册未返回目标 token')); return; }
-        setTimeout(check, 120);
+        try {
+          var editorAPI = getEditorAPI();
+          var recordMap = editorAPI && editorAPI.dataService && editorAPI.dataService.getRecordMap();
+          var inserted = null;
+          if (recordMap) recordMap.forEach(function (record) {
+            var snapshot = record && record.snapshot;
+            var token = snapshot && snapshot.type === 'image' && snapshot.image && snapshot.image.token;
+            if (!inserted && record && record.id && !previousIds.has(String(record.id)) && token) {
+              inserted = { recordId: String(record.id), token: String(token) };
+            }
+          });
+          if (inserted) { resolve(inserted); return; }
+          if (Date.now() >= deadline) { reject(new Error('图片原生粘贴未注册目标图片资源')); return; }
+          setTimeout(check, 120);
+        } catch (error) { reject(error); }
       }
       check();
     });
@@ -647,43 +446,6 @@
     var selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
-  }
-
-  function removeRenderedImageMarker(marker) {
-    if (!selectRenderedImageMarker(marker)) return Promise.resolve(false);
-    var deleted = false;
-    try { deleted = document.execCommand('delete') === true; } catch (error) {}
-    if (!deleted) {
-      try { deleted = document.execCommand('insertText', false, '') === true; } catch (error) {}
-    }
-    if (!deleted) throw new Error('图片槽位清理失败');
-    return waitForRenderedImageMarkerRemoval(marker, 5000).then(function () { return true; });
-  }
-
-  function cleanupRemainingRenderedImageMarkers(descriptors, viewport) {
-    var step = Math.max(320, Math.floor(viewport.clientHeight * 0.72));
-    var top = 0;
-    return new Promise(function (resolve, reject) {
-      function check() {
-        try {
-          for (var i = 0; i < descriptors.length; i++) {
-            if (!selectRenderedImageMarker(descriptors[i].marker)) continue;
-            var deleted = document.execCommand('delete') === true;
-            if (!deleted) throw new Error('图片槽位清理失败');
-            setTimeout(check, 100);
-            return;
-          }
-        } catch (error) { reject(error); return; }
-        var maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        if (top >= maxTop) { resolve(); return; }
-        top = Math.min(maxTop, top + step);
-        viewport.scrollTop = top;
-        try { viewport.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (error) {}
-        setTimeout(check, 140);
-      }
-      viewport.scrollTop = 0;
-      setTimeout(check, 200);
-    });
   }
 
   function indexRegisteredImageMarkers(recordMap, mappings) {
@@ -880,7 +642,7 @@
         return selectRegisteredImageMarker(anchorMarker, viewport, nextScrollTop).then(function (location) {
           nextScrollTop = location.scrollTop;
           placeCaretAfterRenderedImageMarker(anchorMarker);
-          var previousImageIds = snapshotRenderedImageIds();
+          var previousImageIds = snapshotRegisteredImageIds();
           return writeClipboardPayloadWithExtension({ imageDataUrl: descriptor.base64 }, true).then(function (result) {
             result.previousImageIds = previousImageIds;
             return result;
@@ -891,11 +653,9 @@
             try { pasted = document.execCommand('paste') === true; } catch (error) {}
             if (!pasted) throw new Error('浏览器未接受第 ' + (index + 1) + ' 张图片的原生粘贴');
           }
-          return waitForRenderedImageInsertion(clipboardResult.previousImageIds, 20000).then(function (recordId) {
-            return waitForRenderedImageToken(recordId, 60000).then(function (targetToken) {
-              mappings.push({ marker: descriptor.marker, targetToken: targetToken, stagingBlockId: recordId,
-                width: descriptor.width, height: descriptor.height });
-            });
+          return waitForRegisteredImageInsertion(clipboardResult.previousImageIds, 60000).then(function (inserted) {
+            mappings.push({ marker: descriptor.marker, targetToken: inserted.token, stagingBlockId: inserted.recordId,
+              width: descriptor.width, height: descriptor.height });
           });
         }).then(function () {
           emitUiProgress({ phase: 'image-native-paste', done: index + 1, total: expected.length, label: '重建图片' });
@@ -917,105 +677,4 @@
       viewport.scrollTop = Math.min(originalScrollTop, Math.max(0, viewport.scrollHeight - viewport.clientHeight));
       throw error;
     });
-  }
-
-  // ── Image injection observer (for paste flows that leave img placeholders) ─
-
-  function injectBase64ImagesIntoEditor(orderedImageBase64List) {
-    var list = orderedImageBase64List || [];
-    if (!list.length) return 0;
-    var editable = getContentRootElement();
-    if (!editable) return 0;
-    var imageBlocks = editable.querySelectorAll('[data-block-type="image"]');
-    if (!imageBlocks.length) return 0;
-
-    var injected = 0;
-    imageBlocks.forEach(function (block, index) {
-      if (index >= list.length) return;
-      var imageData = list[index];
-      if (!imageData || !imageData.base64) return;
-      var dataUrl = imageData.base64.indexOf('data:') === 0
-        ? imageData.base64
-        : 'data:image/png;base64,' + imageData.base64;
-
-      var img = block.querySelector('img');
-      if (img) {
-        if (img.src !== dataUrl) img.src = dataUrl;
-        if (imageData.width) img.setAttribute('width', imageData.width);
-        if (imageData.height) img.setAttribute('height', imageData.height);
-        injected++;
-        return;
-      }
-
-      var container = block.querySelector(
-        '.img, [class*="image-content"], [class*="img-container"], [class*="ImgContainer"], [class*="image-wrap"]'
-      );
-      if (container) {
-        var newImg = document.createElement('img');
-        newImg.src = dataUrl;
-        newImg.style.cssText = 'max-width:100%;height:auto;display:block;';
-        if (imageData.width) newImg.setAttribute('width', imageData.width);
-        if (imageData.height) newImg.setAttribute('height', imageData.height);
-        container.appendChild(newImg);
-        injected++;
-      }
-    });
-
-    return injected;
-  }
-
-  var imageInjectionObserver = null;
-  var imageInjectionRetryCount = 0;
-  var MAX_IMAGE_INJECTION_RETRIES = 8;
-
-  function stopImageInjectionObserver() {
-    if (imageInjectionObserver) {
-      clearTimeout(imageInjectionObserver._timer);
-      imageInjectionObserver.disconnect();
-      imageInjectionObserver = null;
-    }
-    imageInjectionRetryCount = 0;
-  }
-
-  function startImageInjectionObserver() {
-    if (imageInjectionObserver) return;
-    var target = getContentRootElement() || document.body;
-    if (!target) return;
-    imageInjectionObserver = new MutationObserver(function () {
-      clearTimeout(imageInjectionObserver._timer);
-      imageInjectionObserver._timer = setTimeout(function () {
-        getPendingPaste().then(function (pending) {
-          var list = (pending && pending.orderedImageBase64List) || [];
-          if (!list.length) {
-            // 没有待注入数据时不应继续常驻监听，避免误改页面图片。
-            stopImageInjectionObserver();
-            return;
-          }
-          var count = injectBase64ImagesIntoEditor(list);
-          if (count >= list.length) {
-            // 全部注入完成，立即停止监听，防止后续持续覆盖导致图片抖动/错位。
-            stopImageInjectionObserver();
-          } else if (count > 0 && imageInjectionRetryCount < MAX_IMAGE_INJECTION_RETRIES) {
-            imageInjectionRetryCount++;
-            setTimeout(function () {
-              getPendingPaste().then(function (next) {
-                if (next && next.orderedImageBase64List) {
-                  injectBase64ImagesIntoEditor(next.orderedImageBase64List);
-                }
-              });
-            }, 1500);
-          }
-        });
-      }, 500);
-    });
-    imageInjectionObserver.observe(target, { childList: true, subtree: true });
-    registerDisposer(function () {
-      if (imageInjectionObserver) {
-        imageInjectionObserver.disconnect();
-        imageInjectionObserver = null;
-      }
-    });
-
-    // 兜底：粘贴后 20 秒内若仍未完成注入，强制停止，避免观察器长期常驻。
-    setTimeout(stopImageInjectionObserver, 20000);
   }

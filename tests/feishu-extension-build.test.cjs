@@ -138,7 +138,7 @@ test('whiteboard transfer uses scoped Native Messaging with immutable source han
 });
 
 test('image metrics use the same docx record source as paste payloads', () => {
-  assert.match(artifacts.mainWorld, /buildImageEntriesFromDocxRecord\(content\.docxRecord\)/);
+  assert.match(artifacts.mainWorld, /buildImageEntriesFromDocxRecord\(\{ recordMap: collectDocumentImageRecords\(service\.rootBlock\) \}\)/);
   assert.match(artifacts.mainWorld, /imageCount: countExtractedImages\(content\)/);
   assert.doesNotMatch(artifacts.mainWorld, /function extractDomImages/);
   assert.doesNotMatch(artifacts.mainWorld, /document\.querySelectorAll\('img'\)\.forEach/);
@@ -211,7 +211,6 @@ test('paste flow carries the source page icon emoji as page metadata', () => {
   assert.match(artifacts.mainWorld, /function applyPageIconEmojiToCurrentDoc/);
   assert.match(artifacts.mainWorld, /em-emoji-picker/);
   assert.match(artifacts.mainWorld, /\.page-block-header \[class\*="doc-custom-icon"\]/);
-  assert.match(artifacts.mainWorld, /pageIconEmoji: String\(pending\.pageIconEmoji \|\| ''\)/);
   assert.match(artifacts.mainWorld, /applyPageIconEmojiToCurrentDoc\(pending\.pageIconEmoji\)/);
   assert.match(artifacts.mainWorld, /cleanupPageIconUi\(\)/);
 });
@@ -233,7 +232,7 @@ test('paste flow focuses the document body after writing the title', () => {
   assert.match(artifacts.mainWorld, /function activateEmptyDocumentBodyForPaste/);
   assert.match(artifacts.mainWorld, /ready\.rootChildCount !== 0/);
   assert.match(artifacts.mainWorld, /querySelectorAll\('\.first-line-empty'\)/);
-  assert.match(artifacts.mainWorld, /node\.querySelector\('\.docx-empty-placeholder'\)/);
+  assert.doesNotMatch(artifacts.mainWorld, /node\.querySelector\('\.docx-empty-placeholder'\)/);
   assert.match(artifacts.mainWorld, /node\.closest\('\.editor-container'\)/);
   assert.match(artifacts.mainWorld, /waitForDocumentBodyPasteTarget\(6000\)/);
   assert.match(artifacts.mainWorld, /label: '准备正文'/);
@@ -246,15 +245,10 @@ test('successful extraction detail does not duplicate the status icon with an em
   assert.doesNotMatch(artifacts.mainWorld, /var toastMsg = '✅ 已提取 '/);
 });
 
-test('image upload uses bounded parallelism instead of one-by-one serial upload', () => {
-  assert.match(artifacts.mainWorld, /var concurrency = Math\.min\(4, images\.length\)/);
-  assert.match(artifacts.mainWorld, /return Promise\.all\(workers\)\.then/);
-});
-
-test('image conversion also uses bounded parallelism', () => {
-  assert.match(artifacts.mainWorld, /function convertImagesToBase64/);
-  assert.match(artifacts.mainWorld, /var concurrency = Math\.min\(5, workItems\.length\)/);
-  assert.match(artifacts.mainWorld, /return Promise\.all\(workers\)\.then/);
+test('image conversion uses the shared concurrency pool and image paste has one registration path', () => {
+  assert.match(artifacts.mainWorld, /mapWithConcurrency\(workItems, 5, convertOne\)/);
+  assert.match(artifacts.mainWorld, /waitForRegisteredImageInsertion\(clipboardResult\.previousImageIds, 60000\)/);
+  assert.doesNotMatch(artifacts.mainWorld, /function uploadAllImages|function startImageInjectionObserver/);
 });
 
 test('popup renders one authoritative progress state for counted and uncounted phases', () => {

@@ -20,7 +20,7 @@ function textSnapshot(text) {
   };
 }
 
-function loadPasteTargetRuntime(editorAPI, validationSnapshot = { blockCount: 0 }) {
+function loadPasteTargetRuntime(editorAPI, validationSnapshot = { blockCount: 0 }, overrides = {}) {
   const source = fs.readFileSync(
     path.join(ROOT, 'src/feishu-runtime/35-paste-target.js'),
     'utf8'
@@ -30,10 +30,12 @@ function loadPasteTargetRuntime(editorAPI, validationSnapshot = { blockCount: 0 
     getEditorAPI: () => editorAPI,
     captureValidationSnapshot: () => validationSnapshot,
     setTimeout,
+    ...overrides,
   };
   vm.createContext(context);
   vm.runInContext(
     source + '\nthis.__pasteTargetTestApi = {'
+      + 'activateEmptyDocumentBodyForPaste: activateEmptyDocumentBodyForPaste,'
       + 'captureEmptyBodyRecordsBeforePaste: captureEmptyBodyRecordsBeforePaste,'
       + 'waitForEmptyBodyRecordsCapture: waitForEmptyBodyRecordsCapture,'
       + 'removePreservedEmptyBodyRecords: removePreservedEmptyBodyRecords,'
@@ -414,4 +416,74 @@ test('paste cleanup observer removes an anchor committed after the paste promise
 
   await new Promise((resolve) => setTimeout(resolve, 550));
   assert.deepEqual(records.get('root').snapshot.children, ['body']);
+});
+
+function emptyBodyActivationFixture({ childCount = 0, hasRootBlock = true, placeholderClass = '' } = {}) {
+  let activations = 0;
+  const container = {
+    querySelectorAll(selector) {
+      assert.equal(selector, '.first-line-empty');
+      return this.firstLines;
+    },
+    firstLines: [],
+  };
+  const firstLine = {
+    placeholderClass,
+    visible: true,
+    scrollIntoView() {},
+    closest(selector) {
+      return selector === '.editor-container' ? container : null;
+    },
+    querySelector() { throw new Error('internal placeholder/AI markup must not control body activation'); },
+    click() { activations += 1; },
+  };
+  container.firstLines.push(firstLine);
+  const root = { closest(selector) { return selector === '.editor-container' ? container : null; } };
+  const api = loadPasteTargetRuntime(null, { blockCount: 0 }, {
+    getEditorReadyState() { return { hasRootBlock, rootChildCount: childCount }; },
+    getContentRootElement() { return root; },
+    isVisibleElement(node) { return node.visible; },
+    document: { querySelectorAll() { throw new Error('must stay within the current editor container'); } },
+  });
+  return { api, container, firstLine, activations: () => activations };
+}
+
+test('empty body activation supports old text placeholders and new AI hints through the same first-line container', () => {
+  for (const placeholderClass of ['docx-empty-placeholder', 'ai-block-write-placeholder is-root']) {
+    const fixture = emptyBodyActivationFixture({ placeholderClass });
+
+    assert.equal(fixture.api.activateEmptyDocumentBodyForPaste(), true, placeholderClass);
+    assert.equal(fixture.activations(), 1, placeholderClass);
+  }
+});
+
+test('empty body activation never clicks a placeholder for a non-empty or unavailable document', () => {
+  for (const options of [{ childCount: 1 }, { hasRootBlock: false }]) {
+    const fixture = emptyBodyActivationFixture(options);
+
+    assert.equal(fixture.api.activateEmptyDocumentBodyForPaste(), false);
+    assert.equal(fixture.activations(), 0);
+  }
+});
+
+test('empty body activation excludes hidden, header and nested-editor first lines', () => {
+  const fixture = emptyBodyActivationFixture();
+  function invalidLine({ visible = true, nested = false, header = false }) {
+    return {
+      visible,
+      closest(selector) {
+        if (selector === '.editor-container') return nested ? {} : fixture.container;
+        return header ? {} : null;
+      },
+      click() { throw new Error('must not activate other surfaces'); },
+    };
+  }
+  fixture.container.firstLines.unshift(
+    invalidLine({ visible: false }), invalidLine({ nested: true }), invalidLine({ header: true })
+  );
+
+  assert.equal(fixture.api.activateEmptyDocumentBodyForPaste(), true);
+  assert.equal(fixture.activations(), 1);
+  fixture.firstLine.visible = false;
+  assert.equal(fixture.api.activateEmptyDocumentBodyForPaste(), false);
 });

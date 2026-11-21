@@ -9,6 +9,7 @@
 - reload 后至少用 `agent-browser --cdp 9223 eval --stdin` 在飞书文档页确认：`Boolean(window.__feishuHelperRuntime)` 为 `true`，且 `document.documentElement.getAttribute('data-feishu-helper-active')` 有值。
 - 测试插件复制/粘贴流程时，源文档使用：`https://scnajei2ds6y.feishu.cn/wiki/AuzLwXbwNiw5WTkXlMJcQmtZnRD`。
 - 测试插件复制/粘贴流程时，目标文档使用：`https://my.feishu.cn/wiki/Ga3PwhYVliu5v7kGk1YckNn3nwo`。
+- 粘贴前必须核验目标正文为空；上述固定链接可能已被用户用于正式内容，非空时改建临时空白文档测试，完成后删除临时文档，禁止清空或覆盖原文。
 - 访问后至少确认当前 URL、页面标题和页面快照，避免误测登录页或空白页。
 - 粘贴到目标文档并确认状态后，必须清除本次粘贴内容，方便下次重跑同一流程。
 

@@ -1,18 +1,18 @@
   // ── Unified paste pipeline ─────────────────────────────────────────────────
 
   // commitPaste handles every "we have a pendingPaste, write the clipboard,
-  // optionally upload images, replace tokens, dispatch the paste" operation.
+  // prepare image slots, then optionally dispatch the paste" operation.
   function commitPaste(content, options) {
     var opts = options || {};
     var canonicalContent = clonePendingPasteData(content);
     if (!canonicalContent) return Promise.reject(new Error('待粘贴内容格式无效'));
-    var hasImagesToUpload = !!(canonicalContent.orderedImageBase64List
+    var hasImages = !!(canonicalContent.orderedImageBase64List
       && canonicalContent.orderedImageBase64List.length);
 
     // canonical pending 永远保持源租户数据不变；目标 token 只写入本次粘贴的深拷贝。
     var pipeline = Promise.resolve(canonicalContent);
 
-    if (hasImagesToUpload) {
+    if (hasImages) {
       if (!opts.silent) showToast('⏳ 准备图片槽位中...', 0);
       pipeline = pipeline.then(function (current) {
         var origRecord = null;
@@ -22,8 +22,6 @@
         current.targetImageDescriptors = buildImagePasteDescriptors(current.orderedImageBase64List);
         current.docxRecord = JSON.stringify(markerizeImagesInDocxRecord(origRecord, current.targetImageDescriptors));
         current.clipboardHtml = markerizeImagesInClipboardHtml(current.clipboardHtml, current.targetImageDescriptors);
-        current.hasImagesToInject = false;
-        current.hasImagesToUpload = false;
         return current;
       });
     }
@@ -52,11 +50,6 @@
                 allowNativePaste: true,
               });
 
-          if (current.hasImagesToInject
-            && current.orderedImageBase64List && current.orderedImageBase64List.length) {
-            startImageInjectionObserver();
-          }
-
           if (!opts.silent) {
             if (hasDowngradedImages && needsManualPaste) {
               showToast('📋 检测到图片块已降级到 base64；已写入剪贴板，请直接按 Cmd+V 走飞书原生粘贴以插入图片', 4600);
@@ -70,7 +63,8 @@
             status: status,
             targetImageDescriptors: current.targetImageDescriptors || [],
           };
-        }).catch(function () {
+        }, function (error) {
+          if (opts.dispatch === false) throw error;
           var status = runPasteAttempt(payload, {
             allowInsert: !needsParser && !preferPasteEventOnly,
             allowDispatch: canAutoDispatch,
@@ -260,9 +254,7 @@
         var semanticSnapshot = (validationSnapshot && validationSnapshot.semanticSnapshot) || null;
         var hasDowngradedImages = !!(payload && payload.hasDowngradedImages)
           || /data-feishu-downgraded-images="true"/i.test(String((payload && payload.html) || ''));
-        var hasImagesToInject = !!(payload && payload.hasImagesToInject);
         var orderedImageBase64List = (payload && payload.orderedImageBase64List) || [];
-        var withBase64 = orderedImageBase64List.filter(function (img) { return !!img.base64; }).length;
         var pending = {
           html: content.html,
           text: content.text,
@@ -271,8 +263,6 @@
           title: docTitle,
           pageIconEmoji: pageIconEmoji,
           hasDowngradedImages: hasDowngradedImages,
-          hasImagesToInject: hasImagesToInject,
-          hasImagesToUpload: !!(payload && payload.hasImagesToUpload),
           orderedImageBase64List: orderedImageBase64List,
           semanticSnapshot: semanticSnapshot,
         };
@@ -281,7 +271,6 @@
         return setPendingPaste(pending).then(function () {
           var imgCount = Number(sourceSummary && sourceSummary.imageCount);
           var inlinedImgCount = (String((payload && payload.html) || '').match(/data:image/g) || []).length;
-          var injectCount = orderedImageBase64List.length;
           var officialBlockCount = Number(sourceSummary && sourceSummary.blockCount);
           var officialEquationCount = Number(sourceSummary && sourceSummary.equationCount);
           var toastMsg = '已提取 ' + officialBlockCount + ' 块 · ' + officialEquationCount
@@ -290,7 +279,6 @@
           if (embeddedChartFallbacks && embeddedChartFallbacks.count) {
             toastMsg += ' · ' + embeddedChartFallbacks.count + ' 内嵌图表已转图片';
           }
-          if (injectCount > 0) toastMsg += ' · ' + injectCount + ' 张待注入';
           showToast(toastMsg, 3600);
 
           var result = {
@@ -306,9 +294,7 @@
             htmlLen: String(content.html || '').length,
             clipboardHtmlLen: String((payload && payload.html) || '').length,
             hasDowngradedImages: hasDowngradedImages,
-            hasImagesToInject: hasImagesToInject,
-            imageInjectCount: orderedImageBase64List.length,
-            imageInjectWithBase64: withBase64,
+            preparedImageCount: orderedImageBase64List.length,
             semanticSnapshot: semanticSnapshot,
           };
           setDocJsonAttr('data-feishu-extraction-result', Object.assign({}, result, { ts: Date.now() }));
@@ -350,34 +336,6 @@
       return discard.then(function () {
         showToast('⚠️ 提取失败：' + stringifyError(error), 4200);
         throw error;
-      });
-    });
-  }
-
-  function buildValidateDuplicateDocumentSummary() {
-    return duplicateDocumentForAutomation().then(function (extraction) {
-      var validationSnapshot = captureValidationSnapshot();
-      return getPendingPaste().then(function (pending) {
-        var summary = Object.assign({}, extraction);
-        if (validationSnapshot) {
-          summary.validationSnapshot = validationSnapshot;
-          summary.semanticSnapshot = validationSnapshot.semanticSnapshot || null;
-        }
-        if (pending) {
-          summary.pendingPaste = {
-            title: String(pending.title || ''),
-            pageIconEmoji: String(pending.pageIconEmoji || ''),
-            textLen: String(pending.text || '').length,
-            htmlLen: String(pending.html || '').length,
-            clipboardHtmlLen: String(pending.clipboardHtml || '').length,
-            hasDowngradedImages: Boolean(pending.hasDowngradedImages),
-            semanticSnapshot: pending.semanticSnapshot || null,
-            ts: Number(pending.ts || 0),
-          };
-        } else {
-          summary.pendingError = 'Pending paste cache was not updated.';
-        }
-        return summary;
       });
     });
   }

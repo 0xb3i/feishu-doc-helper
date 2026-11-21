@@ -8,11 +8,13 @@ const ROOT = path.resolve(__dirname, '..');
 
 function loadImageRuntime(overrides) {
   const source = fs.readFileSync(path.join(ROOT, 'src/feishu-runtime/20-images.js'), 'utf8');
+  const asyncSource = fs.readFileSync(path.join(ROOT, 'src/feishu-runtime/25-runtime-async.js'), 'utf8');
   const progress = [];
   const fetchedUrls = [];
   const context = {
     Promise,
     Date,
+    URL,
     setTimeout,
     IMAGE_PLACEHOLDER_SRC: 'data:image/gif;base64,placeholder',
     location: { origin: 'https://tenant.feishu.cn' },
@@ -25,10 +27,12 @@ function loadImageRuntime(overrides) {
     ...overrides,
   };
   vm.createContext(context);
-  vm.runInContext(source + '\nthis.__imageTestApi = {'
+  vm.runInContext(asyncSource + '\n' + source + '\nthis.__imageTestApi = {'
     + 'convertImagesToBase64: convertImagesToBase64,'
     + 'buildImagePasteDescriptors: buildImagePasteDescriptors,'
     + 'collectDocumentImageRecords: collectDocumentImageRecords,'
+    + 'snapshotRegisteredImageIds: snapshotRegisteredImageIds,'
+    + 'waitForRegisteredImageInsertion: waitForRegisteredImageInsertion,'
     + 'markerizeImagesInDocxRecord: markerizeImagesInDocxRecord,'
     + 'markerizeImagesInClipboardHtml: markerizeImagesInClipboardHtml,'
     + 'findImageMarkerBlocks: findImageMarkerBlocks,'
@@ -304,4 +308,169 @@ test('clipboard HTML markerization keeps repeated source images in document orde
   );
 
   assert.equal(marked, '<p>marker-a</p><p>marker-b</p>');
+});
+
+test('conversion never promotes HTML-only images or unrelated preloaded bytes into the structured manifest', async () => {
+  const runtime = loadImageRuntime();
+  const html = '<img src="https://tenant.feishu.cn/space/api/box/stream/download/preview/avatar/">';
+  const preloaded = { avatar: 'data:image/png;base64,AAAA' };
+
+  const empty = await runtime.api.convertImagesToBase64(html, [], preloaded);
+  assert.equal(empty.html, html);
+  assert.deepEqual(Object.keys(empty.tokenToBase64), []);
+  assert.equal(runtime.fetchedUrls.length, 0);
+
+  const result = await runtime.api.convertImagesToBase64(html, [{ token: 'body-image' }], preloaded);
+  assert.equal(result.html, html);
+  assert.deepEqual(Object.keys(result.tokenToBase64), ['body-image']);
+  assert.equal(runtime.fetchedUrls.length, 1);
+});
+
+test('conversion recognizes signed download URLs, relative sources, both quote styles and CDN tokens', async () => {
+  const runtime = loadImageRuntime();
+  const html = '<img class="a" src=\'/space/api/box/stream/download/all/?token=original&amp;signature=signed\'>'
+    + '<IMG SRC="https://tenant.feishu.cn/space/api/box/stream/download/v2/cover/cover-token/">'
+    + '<img src="https://docs.feishucdn.com/static-resource/v1/cdn-token">';
+
+  const result = await runtime.api.convertImagesToBase64(html,
+    ['original', 'cover-token', 'cdn-token'].map(token => ({ token })));
+
+  assert.equal(result.html, '<img class="a" src="data:image/gif;base64,placeholder">'
+    + '<IMG src="data:image/gif;base64,placeholder"><img src="data:image/gif;base64,placeholder">');
+  assert.deepEqual(runtime.fetchedUrls, [
+    'https://tenant.feishu.cn/space/api/box/stream/download/all/?token=original&signature=signed',
+    'https://tenant.feishu.cn/space/api/box/stream/download/v2/cover/cover-token/',
+    'https://docs.feishucdn.com/static-resource/v1/cdn-token',
+  ]);
+});
+
+test('failed image downloads preserve their source while other images finish normally', async () => {
+  const requests = [];
+  const runtime = loadImageRuntime({
+    fetchImageViaBackground(url) {
+      requests.push(url);
+      return url.includes('broken') ? Promise.reject(new Error('unavailable'))
+        : Promise.resolve('data:image/png;base64,AAAA');
+    },
+  });
+  const broken = '<img src="https://tenant.feishu.cn/space/api/box/stream/download/preview/broken/?preview_type=16">';
+  const result = await runtime.api.convertImagesToBase64(broken
+    + '<img src="https://tenant.feishu.cn/space/api/box/stream/download/preview/good/">',
+  [{ token: 'broken' }, { token: 'good' }]);
+
+  assert.equal(result.html, broken + '<img src="data:image/gif;base64,placeholder">');
+  assert.deepEqual(Object.keys(result.tokenToBase64), ['good']);
+  assert.equal(requests.filter(url => url.includes('broken')).length, 2, 'identical preview URLs are only tried once');
+  assert.equal(runtime.progress.at(-1).done, 2);
+});
+
+test('large repeated image manifests fetch each token once with at most five concurrent downloads', async () => {
+  let active = 0;
+  let peak = 0;
+  let count = 0;
+  const runtime = loadImageRuntime({
+    async fetchImageViaBackground() {
+      count += 1;
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setImmediate(resolve));
+      active -= 1;
+      return 'data:image/png;base64,AAAA';
+    },
+  });
+  const entries = Array.from({ length: 1000 }, (_, index) => ({ token: 'image-' + (index % 10) }));
+  const html = entries.map(entry => '<p><img src="https://tenant.feishu.cn/space/api/box/stream/download/preview/'
+    + entry.token + '/"></p>').join('');
+
+  const result = await runtime.api.convertImagesToBase64(html, entries);
+
+  assert.equal(count, 10);
+  assert.equal(peak, 5);
+  assert.equal((result.html.match(/base64,placeholder/g) || []).length, 1000);
+  assert.equal(runtime.progress.at(-1).done, 1000);
+});
+
+test('native paste identifies newly registered resources from the data model without rendered image attributes', async () => {
+  const records = new Map([
+    ['existing', imageBlock('existing', 'existing-token').record],
+  ]);
+  let scheduled = false;
+  const runtime = loadImageRuntime({
+    getEditorAPI() { return { dataService: { getRecordMap() { return records; } } }; },
+    document: { querySelectorAll() { throw new Error('image registration must not scan DOM'); } },
+    setTimeout(callback) {
+      scheduled = true;
+      records.set('new-image', imageBlock('new-image', 'registered-token').record);
+      queueMicrotask(callback);
+    },
+  });
+  const previousIds = runtime.api.snapshotRegisteredImageIds();
+  records.set('new-image', imageBlock('new-image', '').record);
+
+  const result = await runtime.api.waitForRegisteredImageInsertion(previousIds, 5000);
+
+  assert.equal(scheduled, true, 'wait until upload registration adds the new token');
+  assert.equal(result.recordId, 'new-image');
+  assert.equal(result.token, 'registered-token');
+});
+
+test('native paste registration reports timeout instead of treating an existing image as a new resource', async () => {
+  let now = 0;
+  const records = new Map([['existing', imageBlock('existing', 'existing-token').record]]);
+  const runtime = loadImageRuntime({
+    Date: { now() { return now; } },
+    getEditorAPI() { return { dataService: { getRecordMap() { return records; } } }; },
+    setTimeout(callback) { now += 2000; queueMicrotask(callback); },
+  });
+  await assert.rejects(runtime.api.waitForRegisteredImageInsertion(runtime.api.snapshotRegisteredImageIds(), 2000),
+    /未注册目标图片资源/);
+});
+
+function loadImagePanelRuntime(rootBlock) {
+  const context = {
+    getStructService() { return rootBlock ? { rootBlock } : null; },
+    location: { origin: 'https://tenant.feishu.cn' },
+    docxRecord: require('../lib/feishu-docx-record.cjs'),
+    registerDisposer() {},
+    extractFullDoc() { throw new Error('panel must not render the full document'); },
+    document: { querySelectorAll() { throw new Error('panel must not scan DOM images'); } },
+  };
+  vm.createContext(context);
+  const source = ['20-images.js', '30-content-metadata.js', '40-image-panel.js']
+    .map(name => fs.readFileSync(path.join(ROOT, 'src/feishu-runtime', name), 'utf8')).join('\n');
+  vm.runInContext(source, context);
+  return context;
+}
+
+test('image panel reads nested structured records in document order without full document rendering', () => {
+  const root = { children: [
+    imageBlock('a', 'same-token'),
+    { record: { snapshot: { type: 'text', image: { token: 'not-an-image' } } }, children: [
+      imageBlock('b', 'same-token'), imageBlock('missing-token', ''), imageBlock('c', 'last-token'),
+    ] },
+  ] };
+  const runtime = loadImagePanelRuntime(root);
+
+  const images = runtime.extractImages();
+
+  assert.deepEqual(Array.from(images, image => image.token), ['same-token', 'same-token', 'last-token']);
+  assert.equal(images[0].width, 10);
+  assert.equal(images[0].height, 20);
+  assert.match(images[0].src, /\/preview\/same-token\//);
+  assert.equal(loadImagePanelRuntime(null).extractImages().length, 0);
+});
+
+test('image panel handles deeply nested trees and cyclic view references without recursion or duplicate traversal', () => {
+  const root = { children: [] };
+  let parent = root;
+  for (let index = 0; index < 20000; index += 1) {
+    const next = { children: [] };
+    parent.children.push(next);
+    parent = next;
+  }
+  parent.children.push(imageBlock('deep-image', 'deep-token'), root);
+
+  const images = loadImagePanelRuntime(root).extractImages();
+
+  assert.deepEqual(Array.from(images, image => image.token), ['deep-token']);
 });

@@ -50,7 +50,7 @@ function validateChromeOrigin(config) {
 function validateRequest(config, request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Native 请求格式无效');
   if (request.type !== REQUEST_TYPE || request.host !== config.hostName) throw new Error('Native 请求类型无效');
-  const allowed = new Set(['type', 'host', 'op', 'action', 'bundleId', 'sourceUrl', 'targetUrl', 'images']);
+  const allowed = new Set(['type', 'host', 'op', 'action', 'bundleId', 'sourceUrl', 'targetUrl']);
   Object.keys(request).forEach(function (key) {
     if (!allowed.has(key)) throw new Error('Native 请求包含不支持的字段');
   });
@@ -81,28 +81,6 @@ function validateRequest(config, request) {
       || !hasTargetUrl || !transfer.isSupportedDocumentUrl(request.targetUrl) || hasSourceUrl) {
       throw new Error('Native 目标请求无效');
     }
-    return;
-  }
-  if (request.op === 'reconcileImages') {
-    if (request.action !== 'paste' || hasBundleId || hasSourceUrl || !hasTargetUrl
-      || !transfer.isSupportedDocumentUrl(request.targetUrl)
-      || !Array.isArray(request.images) || !request.images.length || request.images.length > 500) {
-      throw new Error('Native 图片归位请求无效');
-    }
-    const markers = new Set();
-    const stagingIds = new Set();
-    request.images.forEach(function (image) {
-      if (!image || typeof image !== 'object' || Array.isArray(image)
-        || Object.keys(image).some((key) => !['marker', 'targetToken', 'stagingBlockId'].includes(key))
-        || !/^\[\[FEISHU_HELPER_IMAGE:[a-z0-9]+:[0-9]{4}\]\]$/.test(String(image.marker || ''))
-        || !transfer.RESOURCE_TOKEN_RE.test(String(image.targetToken || ''))
-        || !transfer.BLOCK_ID_RE.test(String(image.stagingBlockId || ''))
-        || markers.has(image.marker) || stagingIds.has(image.stagingBlockId)) {
-        throw new Error('Native 图片归位绑定无效');
-      }
-      markers.add(image.marker);
-      stagingIds.add(image.stagingBlockId);
-    });
     return;
   }
   if (request.op === 'discard') {
@@ -144,9 +122,6 @@ function createHandler(config) {
     if (request.op === 'export') return serviceFor(request.sourceUrl).exportSource(request.sourceUrl);
     if (request.op === 'preflight') return serviceFor(request.targetUrl).preflight(request.bundleId, request.targetUrl);
     if (request.op === 'apply') return serviceFor(request.targetUrl).apply(request.bundleId, request.targetUrl);
-    if (request.op === 'reconcileImages') {
-      return serviceFor(request.targetUrl).reconcileImages(request.images, request.targetUrl);
-    }
     if (request.op === 'discard') {
       store.discard(request.bundleId);
       return { discarded: true };

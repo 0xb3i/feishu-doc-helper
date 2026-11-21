@@ -1,9 +1,10 @@
   // ── Structured image extraction panel ─────────────────────────────────────
 
   function extractImages() {
-    var content = null;
-    try { content = extractFullDoc(); } catch (error) {}
-    return content ? buildImageEntriesFromDocxRecord(content.docxRecord) : [];
+    var service = getStructService();
+    if (!service || !service.rootBlock) return [];
+    // 面板只需要结构化图片字段，无需生成全文 HTML、Markdown 或剪贴板快照。
+    return buildImageEntriesFromDocxRecord({ recordMap: collectDocumentImageRecords(service.rootBlock) });
   }
 
   function ensureImagePanelStyles() {
@@ -43,7 +44,10 @@
     document.head.appendChild(style);
   }
 
+  var closeActiveImagePanel = null;
+
   function createImagePanel(images) {
+    if (closeActiveImagePanel) closeActiveImagePanel();
     var existing = document.getElementById('__feishu_image_panel__');
     if (existing) existing.remove();
     ensureImagePanelStyles();
@@ -62,7 +66,7 @@
       + '</div>'
       + '<div class="feishu-imgx__body">'
       + '<div class="feishu-imgx__grid"></div>'
-      + '</div></div></div>';
+      + '</div></div>';
 
     panel.querySelector('.feishu-imgx__title').textContent = '图片提取 (' + images.length + ' 张)';
     var grid = panel.querySelector('.feishu-imgx__grid');
@@ -71,8 +75,9 @@
       card.className = 'feishu-imgx__card';
       var preview = document.createElement('img');
       preview.className = 'feishu-imgx__thumb';
+      preview.loading = 'lazy';
+      preview.decoding = 'async';
       preview.src = img.src;
-      preview.crossOrigin = 'anonymous';
       preview.alt = '图片 ' + (index + 1);
       var metadata = document.createElement('div');
       metadata.className = 'feishu-imgx__meta';
@@ -90,25 +95,32 @@
 
     document.body.appendChild(panel);
 
+    var downloadTimers = [];
     function closePanel() {
       panel.remove();
+      downloadTimers.forEach(clearTimeout);
+      downloadTimers = [];
       document.removeEventListener('keydown', onKeydown, true);
+      if (closeActiveImagePanel === closePanel) closeActiveImagePanel = null;
     }
+    closeActiveImagePanel = closePanel;
     function onKeydown(e) {
       if (e.key === 'Escape') closePanel();
     }
 
     panel.querySelector('#__feishu_close_panel__').onclick = closePanel;
     panel.querySelector('#__feishu_download_all__').onclick = function () {
+      downloadTimers.forEach(clearTimeout);
+      downloadTimers = [];
       images.forEach(function (img, i) {
-        setTimeout(function () {
+        downloadTimers.push(setTimeout(function () {
           var a = document.createElement('a');
           a.href = img.src;
           a.target = '_blank';
           a.rel = 'noopener noreferrer';
           a.download = 'feishu_img_' + (i + 1) + '.png';
           a.click();
-        }, i * 300);
+        }, i * 300));
       });
     };
     panel.addEventListener('click', function (e) {
@@ -116,3 +128,7 @@
     });
     document.addEventListener('keydown', onKeydown, true);
   }
+
+  registerDisposer(function () {
+    if (closeActiveImagePanel) closeActiveImagePanel();
+  });

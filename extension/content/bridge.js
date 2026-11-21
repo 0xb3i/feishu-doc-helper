@@ -547,22 +547,12 @@
       request.bundleId = String(detail.bundleId || '');
       request.targetUrl = location.href;
     }
-    if (op === protocol.NATIVE_MESSAGING.OPS.RECONCILE_IMAGES) {
-      request.targetUrl = location.href;
-      request.images = Array.isArray(detail.images) ? detail.images : [];
-    }
     if (op === protocol.NATIVE_MESSAGING.OPS.DISCARD) {
       request.bundleId = String(detail.bundleId || '');
     }
     var validation = protocol.validateNativeMessagingRequest(request);
     if (!validation.ok) {
-      var diagnostic = op === protocol.NATIVE_MESSAGING.OPS.RECONCILE_IMAGES
-        ? ' [action=' + String(request.action) + ', target=' + Boolean(request.targetUrl)
-          + ', bundle=' + Object.prototype.hasOwnProperty.call(request, 'bundleId')
-          + ', source=' + Object.prototype.hasOwnProperty.call(request, 'sourceUrl')
-          + ', images=' + (Array.isArray(request.images) ? request.images.length : -1) + ']'
-        : '';
-      reply({ ok: false, error: validation.error + diagnostic });
+      reply({ ok: false, error: validation.error });
       return;
     }
     if ((op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT || op === protocol.NATIVE_MESSAGING.OPS.APPLY)

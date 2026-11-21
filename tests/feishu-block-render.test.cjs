@@ -6,6 +6,7 @@ const styleCodec = require('../lib/feishu-style-codec.cjs');
 const docxRecord = require('../lib/feishu-docx-record.cjs');
 const { createHtmlSanitizer } = require('../lib/feishu-html-sanitizer.cjs');
 const { createBlockRenderer } = require('../lib/feishu-block-render.cjs');
+const { createSemanticSnapshotCollector } = require('../lib/feishu-semantic-snapshot.cjs');
 
 const sanitizer = createHtmlSanitizer({
   normalizeLatexHtmlTextNodes: attribs.normalizeLatexHtmlTextNodes,
@@ -88,4 +89,29 @@ test('unsupported whiteboard blocks are silently skipped from rendered content a
   assert.equal(Object.values(payload.recordMap).some(function (record) {
     return record && record.snapshot && record.snapshot.type === 'whiteboard';
   }), false);
+});
+
+test('callout style enrichment is read-only and shared by nested rendering and clipboard records', () => {
+  const renderer = createBlockRenderer({
+    attribs, styleCodec, docxRecord,
+    sanitizer: { finalizeHtmlFragment: (html) => html },
+  });
+  const snapshot = Object.freeze({ ...textSnapshot('Nested callout'), type: 'callout', border_color: '#123456' });
+  const root = pageWith([block('grid', { type: 'grid' }, [block('callout', snapshot)])]);
+  const context = { calloutStyleResolver: () => ({ background_color: '#abcdef', border_color: '#ffffff' }) };
+
+  const rendered = renderer.renderRootBlock(root, context);
+  const payload = renderer.buildDocxRecordPayload(root, context);
+  assert.match(rendered.htmlParts.join(''), /background-color:#abcdef/);
+  assert.match(rendered.htmlParts.join(''), /border-color:#123456/);
+  assert.equal(payload.recordMap.callout.snapshot.background_color, '#abcdef');
+  assert.equal(payload.recordMap.callout.snapshot.border_color, '#123456');
+  assert.equal(snapshot.background_color, undefined);
+
+  context.calloutStyleResolver = () => ({ background_color: '#fedcba' });
+  assert.match(renderer.renderRootBlock(root, context).htmlParts.join(''), /background-color:#fedcba/);
+  const collector = createSemanticSnapshotCollector({ attribs, styleCodec, renderer });
+  const summary = collector.collectFromStructService(root, context);
+  assert.equal(summary.components.some((component) => component.type === 'callout'), true);
+  assert.equal(snapshot.background_color, undefined);
 });
