@@ -18,9 +18,15 @@
 
 ## 产品截图
 
-![飞书文档助手弹窗](docs/screenshots/popup.png)
+### 主界面
 
-![飞书文档助手图片选择面板](docs/screenshots/image-picker.png)
+<p align="center">
+  <img src="docs/screenshots/popup.png" width="348" alt="飞书文档助手主界面">
+</p>
+
+### 图片选择面板
+
+<img src="docs/screenshots/image-picker.png" width="100%" alt="飞书文档助手图片选择面板">
 
 ## 核心能力
 
