@@ -16,6 +16,12 @@
 
 飞书文档助手把文档迁移拆成「提取」和「粘贴」两个动作。你可以从当前飞书文档提取正文、图片和画板信息，将内容保存在扩展缓存中，再切换到另一个可编辑的文档完成粘贴。跨账号画板迁移由浏览器端重建画板，本机 Native Host 负责调用 `lark-cli` 读取源文档和画板元数据。
 
+## 产品截图
+
+![飞书文档助手弹窗](docs/screenshots/popup.png)
+
+![飞书文档助手图片选择面板](docs/screenshots/image-picker.png)
+
 ## 核心能力
 
 - 提取飞书 / Lark 文档正文，并在目标文档中写入
@@ -87,6 +93,7 @@ src/feishu-runtime/         注入飞书页面 MAIN world 的运行时模块
 lib/                        构建时内联的纯函数和迁移辅助模块
 bin/                        扩展构建与本地重载脚本
 tests/                      运行时、构建、安全边界和迁移测试
+docs/screenshots/           README 产品截图
 assets/                     产品图标资源
 ```
 
