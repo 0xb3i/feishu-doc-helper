@@ -696,7 +696,6 @@ test('document extraction always asks the official API even when browser structu
     setPendingPaste: function (value) { pending = value; return Promise.resolve(); },
     countExtractedImages: function () { return 0; },
     setDocJsonAttr: function () {},
-    requestWhiteboardDiscard: function () { return Promise.resolve(); },
     stringifyError: function (error) { return String(error && error.message || error); },
   };
   vm.createContext(context);
@@ -710,4 +709,5 @@ test('document extraction always asks the official API even when browser structu
   assert.equal(result.equationCount, 3);
   assert.equal(result.whiteboardCount, 0);
   assert.equal(pending.text, 'body');
+  assert.equal(pending.blockCount, 205);
 });

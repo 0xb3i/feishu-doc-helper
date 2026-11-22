@@ -94,13 +94,8 @@
       var transfer = pending.whiteboardTransfer && isValidWhiteboardTransfer(pending.whiteboardTransfer)
         ? pending.whiteboardTransfer
         : null;
-      // 新版 lark-cli 禁止把导出的 OpenAPI raw 节点直接写回画板。提取链路已经
-      // 捕获并校验了飞书画板自身的 PageDetail，因此优先通过当前编辑器的白板
-      // runtime 导入；仅为不含 browserBoards 的旧迁移包保留 Native Host 兼容路径。
       var preflight = transfer
-        ? (showToast('⏳ 校验画板迁移环境...', 0), hasBrowserWhiteboardPayload(transfer)
-            ? requestBrowserWhiteboardPreflight(transfer)
-            : requestWhiteboardPreflight(transfer))
+        ? (showToast('⏳ 校验画板迁移环境...', 0), requestBrowserWhiteboardPreflight(transfer))
         : Promise.resolve({ needsBodyPaste: true, alreadyComplete: false });
 
       return preflight.then(function (plan) {
@@ -113,9 +108,7 @@
           if (!transfer) return Promise.resolve(result);
           showToast('⏳ 正在重建 ' + transfer.boardCount + ' 个画板...', 0);
           emitUiProgress({ phase: 'whiteboard-apply', done: 0, total: transfer.boardCount, label: '重建画板' });
-          var apply = plan && plan.browserFallback
-            ? applyBrowserWhiteboards(transfer)
-            : requestWhiteboardApply(transfer);
+          var apply = applyBrowserWhiteboards(transfer);
           return apply.then(function (summary) {
             emitUiProgress({
               phase: 'whiteboard-apply',
@@ -139,7 +132,10 @@
         var wasEmptyBodyBeforeFocus = !!preFocusSnapshot
           && Number(preFocusSnapshot.blockCount || 0) === 0;
         emitUiProgress({ phase: 'body-target', done: 0, total: 0, label: '准备正文' });
-        return applyDocumentTitleToCurrentDoc(pending.title).then(function (titleApplied) {
+        var applyTitle = pending.kind === 'images'
+          ? Promise.resolve(false)
+          : applyDocumentTitleToCurrentDoc(pending.title);
+        return applyTitle.then(function (titleApplied) {
           return waitForDocumentBodyPasteTarget(6000).then(function (focused) {
             if (!focused) {
               restoreCurrentSelection(savedSelection);
@@ -187,7 +183,10 @@
               // 图片归位直接通过当前编辑器的数据服务完成，不再 reload 丢弃尚未落云的正文。
               return applyWhiteboards(result).then(function (finalResult) {
                 return applyPageIconEmojiToCurrentDoc(pending.pageIconEmoji).then(function () {
-                  closeHeaderTitleRenameInput();
+                  if (pending.kind !== 'images') closeHeaderTitleRenameInput();
+                  if (pending.kind === 'images') {
+                    showToast('已写入 ' + finalResult.imageReconciliation.imageCount + ' 张图片', 3000);
+                  }
                   return finalResult;
                 });
               });
@@ -249,6 +248,7 @@
 
       var docTitle = getDocumentTitle();
       var pageIconEmoji = extractPageIconEmojiFromDom();
+      var blockCount = sourceSummary.blockCount;
       return buildClipboardPayload(content).then(function (payload) {
         var validationSnapshot = captureValidationSnapshot();
         var semanticSnapshot = (validationSnapshot && validationSnapshot.semanticSnapshot) || null;
@@ -264,6 +264,7 @@
           pageIconEmoji: pageIconEmoji,
           hasDowngradedImages: hasDowngradedImages,
           orderedImageBase64List: orderedImageBase64List,
+          blockCount: blockCount,
           semanticSnapshot: semanticSnapshot,
         };
         if (activeTransfer) pending.whiteboardTransfer = activeTransfer;
@@ -271,20 +272,16 @@
         return setPendingPaste(pending).then(function () {
           var imgCount = Number(sourceSummary && sourceSummary.imageCount);
           var inlinedImgCount = (String((payload && payload.html) || '').match(/data:image/g) || []).length;
-          var officialBlockCount = Number(sourceSummary && sourceSummary.blockCount);
           var officialEquationCount = Number(sourceSummary && sourceSummary.equationCount);
-          var toastMsg = '已提取 ' + officialBlockCount + ' 块 · ' + officialEquationCount
-            + ' 公式 · ' + imgCount + ' 图片';
-          if (activeTransfer) toastMsg += ' · ' + activeTransfer.boardCount + ' 画板';
-          if (embeddedChartFallbacks && embeddedChartFallbacks.count) {
-            toastMsg += ' · ' + embeddedChartFallbacks.count + ' 内嵌图表已转图片';
-          }
-          showToast(toastMsg, 3600);
+          // 常规提取成功由弹窗卡片反馈，清除已捕获的进度提示。
+          showToast(embeddedChartFallbacks && embeddedChartFallbacks.count
+            ? embeddedChartFallbacks.count + ' 内嵌图表已转图片'
+            : '', 3600);
 
           var result = {
             title: docTitle,
             pageIconEmoji: pageIconEmoji,
-            blockCount: officialBlockCount,
+            blockCount: blockCount,
             equationCount: officialEquationCount,
             imageCount: imgCount,
             whiteboardCount: activeTransfer ? activeTransfer.boardCount : 0,
@@ -309,6 +306,7 @@
           text: content.text,
           title: docTitle,
           pageIconEmoji: pageIconEmoji,
+          blockCount: blockCount,
           semanticSnapshot: fallbackSemantic,
         }).then(function () {
           var imgCount = Number(sourceSummary && sourceSummary.imageCount);
@@ -316,7 +314,7 @@
           var fallbackResult = {
             title: docTitle,
             pageIconEmoji: pageIconEmoji,
-            blockCount: Number(sourceSummary && sourceSummary.blockCount),
+            blockCount: blockCount,
             equationCount: Number(sourceSummary && sourceSummary.equationCount),
             imageCount: imgCount,
             whiteboardCount: 0,
@@ -332,11 +330,8 @@
         });
       });
     }).catch(function (error) {
-      var discard = activeTransfer ? requestWhiteboardDiscard(activeTransfer, 'extract') : Promise.resolve(false);
-      return discard.then(function () {
-        showToast('⚠️ 提取失败：' + stringifyError(error), 4200);
-        throw error;
-      });
+      showToast('⚠️ 提取失败：' + stringifyError(error), 4200);
+      throw error;
     });
   }
 

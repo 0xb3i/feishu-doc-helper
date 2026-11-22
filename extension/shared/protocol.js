@@ -17,6 +17,9 @@
     CLIPBOARD_WRITE: 'FEISHU_EXTENSION_CLIPBOARD_WRITE',
     CLIPBOARD_WRITE_TARGET: 'FEISHU_EXTENSION_CLIPBOARD_WRITE_TARGET',
     PENDING_PASTE: 'FEISHU_EXTENSION_PENDING_PASTE',
+    PENDING_PASTE_QUERY: 'FEISHU_EXTENSION_PENDING_PASTE_QUERY',
+    PENDING_PASTE_PANEL_QUERY: 'FEISHU_EXTENSION_PENDING_PASTE_PANEL_QUERY',
+    PENDING_PASTE_CLEAR: 'FEISHU_EXTENSION_PENDING_PASTE_CLEAR',
   });
 
   var DOM_EVENTS = Object.freeze({
@@ -44,6 +47,7 @@
     SNAPSHOT: 'snapshot',
     SCAN: 'scan',
     IMAGES: 'images',
+    IMAGES_EXTRACT: 'imagesExtract',
   });
 
   var PENDING_OPS = Object.freeze({
@@ -57,9 +61,6 @@
     OPS: Object.freeze({
       INSPECT: 'inspect',
       EXPORT: 'export',
-      PREFLIGHT: 'preflight',
-      APPLY: 'apply',
-      DISCARD: 'discard',
     }),
   });
 
@@ -118,6 +119,7 @@
 
   var ACTION_PENDING_OPS = Object.freeze({
     extract: Object.freeze({ set: true }),
+    imagesExtract: Object.freeze({ set: true }),
     // Target pages may only read canonical source data; expiry is enforced by
     // the service worker and never delegated to page-controlled events.
     paste: Object.freeze({ get: true }),
@@ -213,6 +215,10 @@
     return !!value && value.length <= LIMITS.MAX_REQUEST_ID_LENGTH;
   }
 
+  function getSnapshotCacheKey(tabId, url) {
+    return 'feishu-snapshot:' + tabId + ':' + String(url || '').split('#')[0];
+  }
+
   function normalizeProgressNumber(value) {
     var number = Number(value);
     if (!Number.isFinite(number) || number < 0) return 0;
@@ -229,6 +235,21 @@
     return bytes >= 0 && bytes <= LIMITS.MAX_ACTION_PAYLOAD_BYTES
       ? { ok: true, bytes: bytes }
       : { ok: false, error: 'action payload is invalid or too large' };
+  }
+
+  function validateImageSelection(payload) {
+    var selection = payload && payload.selection;
+    if (!Array.isArray(selection) || !selection.length || selection.length > LIMITS.MAX_PENDING_IMAGE_COUNT) {
+      return false;
+    }
+    var indices = new Set();
+    return selection.every(function (entry) {
+      if (!entry || !Number.isSafeInteger(entry.index) || entry.index < 0 || indices.has(entry.index)
+        || typeof entry.token !== 'string' || entry.token.length > LIMITS.MAX_IMAGE_TOKEN_LENGTH
+        || !/^[A-Za-z0-9_.~-]+$/.test(entry.token)) return false;
+      indices.add(entry.index);
+      return true;
+    });
   }
 
   function findUnsupportedField(value, allowedFields) {
@@ -571,7 +592,9 @@
     };
     if (schemaVersion === 2) {
       allowedFields.pendingId = true;
+      allowedFields.kind = true;
       allowedFields.whiteboardTransfer = true;
+      allowedFields.blockCount = true;
     }
     var unknownField = findUnsupportedField(value, allowedFields);
     if (unknownField) return { ok: false, error: 'pending payload has an unsupported field: ' + unknownField };
@@ -581,6 +604,9 @@
     if (schemaVersion === 2 && (!hasOwnField(value, 'pendingId')
       || !isBoundedIdentifier(value.pendingId, LIMITS.MAX_REQUEST_ID_LENGTH))) {
       return { ok: false, error: 'pending payload ID is invalid' };
+    }
+    if (hasOwnField(value, 'blockCount') && (!Number.isSafeInteger(value.blockCount) || value.blockCount < 0)) {
+      return { ok: false, error: 'pending payload block count is invalid' };
     }
 
     var stringFields = [
@@ -598,6 +624,12 @@
     // payloads require every image entry to carry validated bytes.
     var imageListValidation = validatePendingImageList(value.orderedImageBase64List, schemaVersion === 1);
     if (!imageListValidation.ok) return imageListValidation;
+
+    if (hasOwnField(value, 'kind') && (value.kind !== 'images'
+      || !Array.isArray(value.orderedImageBase64List) || !value.orderedImageBase64List.length
+      || !value.docxRecord || value.pageIconEmoji || hasOwnField(value, 'whiteboardTransfer'))) {
+      return { ok: false, error: 'image-only cache payload is invalid' };
+    }
 
     // Retired image flags are accepted only as inert fields on pending data
     // written by older builds; the one-hour TTL bounds this storage compatibility.
@@ -668,7 +700,7 @@
     }
     var allowedFields = {
       type: true, host: true, op: true, action: true,
-      bundleId: true, sourceUrl: true, targetUrl: true,
+      sourceUrl: true,
     };
     var unknownField = findUnsupportedField(value, allowedFields);
     if (unknownField) {
@@ -686,43 +718,24 @@
       || !hasOwn.call(value, 'op') || !hasOwn.call(value, 'action')) {
       return { ok: false, error: 'native messaging request envelope is incomplete' };
     }
-    var hasBundleId = hasOwn.call(value, 'bundleId');
     var hasSourceUrl = hasOwn.call(value, 'sourceUrl');
-    var hasTargetUrl = hasOwn.call(value, 'targetUrl');
     var op = typeof value.op === 'string' ? value.op : '';
     var action = typeof value.action === 'string' ? value.action : '';
     if (hasSourceUrl && (typeof value.sourceUrl !== 'string' || !isSupportedDocumentUrl(value.sourceUrl))) {
       return { ok: false, error: 'native messaging source URL is invalid' };
     }
-    if (hasTargetUrl && (typeof value.targetUrl !== 'string' || !isSupportedDocumentUrl(value.targetUrl))) {
-      return { ok: false, error: 'native messaging target URL is invalid' };
-    }
 
     if (op === NATIVE_MESSAGING.OPS.INSPECT) {
       if (action !== ACTIONS.SCAN || !isSupportedDocumentUrl(value.sourceUrl)
-        || !hasSourceUrl || hasBundleId || hasTargetUrl) {
+        || !hasSourceUrl) {
         return { ok: false, error: 'native inspect request fields are invalid' };
       }
       return { ok: true, op: op };
     }
     if (op === NATIVE_MESSAGING.OPS.EXPORT) {
       if (action !== ACTIONS.EXTRACT || !isSupportedDocumentUrl(value.sourceUrl)
-        || !hasSourceUrl || hasBundleId || hasTargetUrl) {
+        || !hasSourceUrl) {
         return { ok: false, error: 'native export request fields are invalid' };
-      }
-      return { ok: true, op: op };
-    }
-    if (op === NATIVE_MESSAGING.OPS.PREFLIGHT || op === NATIVE_MESSAGING.OPS.APPLY) {
-      if (action !== ACTIONS.PASTE || !isBundleId(value.bundleId)
-        || !hasBundleId || !hasTargetUrl || !isSupportedDocumentUrl(value.targetUrl) || hasSourceUrl) {
-        return { ok: false, error: 'native target request fields are invalid' };
-      }
-      return { ok: true, op: op };
-    }
-    if (op === NATIVE_MESSAGING.OPS.DISCARD) {
-      if (action !== ACTIONS.EXTRACT || !hasBundleId
-        || !isBundleId(value.bundleId) || hasSourceUrl || hasTargetUrl) {
-        return { ok: false, error: 'native discard request fields are invalid' };
       }
       return { ok: true, op: op };
     }
@@ -812,9 +825,11 @@
     isSupportedDocumentUrl: isSupportedDocumentUrl,
     isUiAction: isUiAction,
     normalizeProgressLabel: normalizeProgressLabel,
+    getSnapshotCacheKey: getSnapshotCacheKey,
     normalizeProgressNumber: normalizeProgressNumber,
     normalizeImageMime: normalizeImageMime,
     validateActionPayload: validateActionPayload,
+    validateImageSelection: validateImageSelection,
     validateClipboardBridgePayload: validateClipboardBridgePayload,
     validateImageUrl: validateImageUrl,
     validateNativeMessagingRequest: validateNativeMessagingRequest,

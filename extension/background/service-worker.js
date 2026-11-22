@@ -9,6 +9,8 @@ var PROGRESS_QUERY = protocol.MESSAGES.PROGRESS_QUERY;
 var IMAGE_FETCH = protocol.MESSAGES.IMAGE_FETCH;
 var CLIPBOARD_WRITE = protocol.MESSAGES.CLIPBOARD_WRITE;
 var PENDING_PASTE = protocol.MESSAGES.PENDING_PASTE;
+var PENDING_PASTE_QUERY = protocol.MESSAGES.PENDING_PASTE_QUERY;
+var PENDING_PASTE_CLEAR = protocol.MESSAGES.PENDING_PASTE_CLEAR;
 var STORAGE_PREFIX = 'feishu-progress:';
 var PENDING_PASTE_KEY = 'feishu-pending-paste';
 var PENDING_PASTE_CLEANUP_ALARM = 'feishu-pending-paste-cleanup';
@@ -40,7 +42,7 @@ function describeNativeMessagingError(error) {
   var message = String(error && error.message || error || '未知错误');
   if (/native messaging host not found|specified native messaging host not found/i.test(message)) {
     return '未找到画板迁移 Host。请先运行 npm run install:native-host，'
-      + '然后完全退出并重新打开 Chrome / Chrome Canary 后重试。';
+      + '然后完全退出并重新打开 Chrome 后重试。';
   }
   return '无法连接画板迁移 Host：' + message;
 }
@@ -153,6 +155,15 @@ function createTrustedPendingId() {
   return '';
 }
 
+async function readExpectedPending(area, message) {
+  var value = await readPendingPaste(area);
+  if (message.expectedPendingId !== undefined
+    && (value ? String(value.pendingId || '') : null) !== message.expectedPendingId) {
+    throw new Error('缓存已变化，请重新打开面板并确认');
+  }
+  return value;
+}
+
 function normalizePendingForStorage(value, senderInfo) {
   var normalized;
   try { normalized = JSON.parse(JSON.stringify(value)); }
@@ -181,6 +192,47 @@ function getTrustedDocumentSender(sender) {
     return null;
   }
   return { tabId: sender.tab.id, url: senderUrl };
+}
+
+function isTrustedExtensionUiSender(sender) {
+  return !!(sender && sender.id === chrome.runtime.id
+    && (!sender.tab || sender.frameId === 0 && sender.url === 'chrome-extension://' + chrome.runtime.id + '/popup/popup.html'));
+}
+
+function summarizePendingPasteMetadata(value) {
+  if (!value || typeof value !== 'object') return null;
+  var ts = Number(value.ts || 0);
+  var expiresAt = ts > 0 ? ts + protocol.LIMITS.PENDING_TTL_MS : 0;
+  var snapshot = value.semanticSnapshot && typeof value.semanticSnapshot === 'object'
+    ? value.semanticSnapshot
+    : null;
+  var blockCount = value.blockCount;
+  if (blockCount === undefined) {
+    blockCount = snapshot && Number.isFinite(Number(snapshot.blockCount))
+      ? Number(snapshot.blockCount)
+      : (Array.isArray(snapshot && snapshot.blocks) ? snapshot.blocks.length : 0);
+  }
+  var imageCount = Array.isArray(value.orderedImageBase64List)
+    ? value.orderedImageBase64List.length
+    : (snapshot && Number.isFinite(Number(snapshot.imageCount)) ? Number(snapshot.imageCount) : 0);
+  var whiteboardCount = value.whiteboardTransfer && Number.isFinite(Number(value.whiteboardTransfer.boardCount))
+    ? Number(value.whiteboardTransfer.boardCount)
+    : (snapshot && Number.isFinite(Number(snapshot.whiteboardCount)) ? Number(snapshot.whiteboardCount) : 0);
+  return {
+    ...(value.kind === 'images' ? { kind: 'images' } : {}),
+    pendingId: String(value.pendingId || ''),
+    title: String(value.title || '未命名文档'),
+    savedFromHost: String(value.savedFromHost || ''),
+    savedFromHref: String(value.savedFromHref || ''),
+    ts: ts,
+    expiresAt: expiresAt,
+    summary: {
+      blockCount: Math.max(0, Math.floor(blockCount)),
+      imageCount: Math.max(0, Math.floor(imageCount)),
+      ...(snapshot && Number.isFinite(snapshot.equationCount) ? { equationCount: snapshot.equationCount } : {}),
+      whiteboardCount: Math.max(0, Math.floor(whiteboardCount)),
+    },
+  };
 }
 
 function validateProgressMessage(message) {
@@ -333,14 +385,6 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       || nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.EXPORT) {
       nativeRequest.sourceUrl = nativeSender.url;
     }
-    if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT
-      || nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.APPLY) {
-      nativeRequest.bundleId = String(nativeInput.bundleId || '');
-      nativeRequest.targetUrl = nativeSender.url;
-    }
-    if (nativeRequest.op === protocol.NATIVE_MESSAGING.OPS.DISCARD) {
-      nativeRequest.bundleId = String(nativeInput.bundleId || '');
-    }
     var nativeValidation = protocol.validateNativeMessagingRequest(nativeRequest);
     if (!nativeValidation.ok) { sendError(sendResponse, nativeValidation.error); return false; }
     try {
@@ -379,7 +423,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     var localArea = getLocalArea();
     if (!localArea) { sendError(sendResponse, 'storage unavailable'); return false; }
     if (pendingOp === protocol.PENDING_OPS.GET) {
-      queuePendingOperation(function () { return readPendingPaste(localArea); })
+      queuePendingOperation(function () { return readExpectedPending(localArea, message); })
         .then(function (value) { sendResponse({ ok: true, value: value }); })
         .catch(function (error) { sendError(sendResponse, error.message); });
       return true;
@@ -392,6 +436,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       var normalizedValidation = protocol.validatePendingPayload(normalizedPending);
       if (!normalizedValidation.ok) { sendError(sendResponse, normalizedValidation.error); return false; }
       queuePendingOperation(async function () {
+        if (message.expectedPendingId !== undefined) await readExpectedPending(localArea, message);
         var data = {};
         data[PENDING_PASTE_KEY] = normalizedPending;
         await localArea.set(data);
@@ -438,6 +483,50 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return true;
   }
 
+  // popup 查询或清空 1 小时共享待粘贴缓存（仅限扩展自身 UI 页面，拒绝网页与 content script）。
+  if (message.source === protocol.MESSAGES.PENDING_PASTE_PANEL_QUERY) {
+    if (!getTrustedDocumentSender(sender)) { sendError(sendResponse, 'untrusted document sender'); return false; }
+    var panelArea = getLocalArea();
+    if (!panelArea) { sendError(sendResponse, 'storage unavailable'); return false; }
+    queuePendingOperation(function () { return readPendingPaste(panelArea); })
+      .then(function (value) {
+        sendResponse({ ok: true, pending: value ? {
+          pendingId: String(value.pendingId || ''),
+          title: String(value.title || '未命名文档'),
+        } : null });
+      })
+      .catch(function (error) { sendError(sendResponse, error.message); });
+    return true;
+  }
+
+  if (message.source === PENDING_PASTE_QUERY) {
+    if (!isTrustedExtensionUiSender(sender)) { sendError(sendResponse, 'untrusted ui sender'); return false; }
+    var queryLocalArea = getLocalArea();
+    if (!queryLocalArea) { sendError(sendResponse, 'storage unavailable'); return false; }
+    queuePendingOperation(function () { return readPendingPaste(queryLocalArea); })
+      .then(function (value) {
+        sendResponse({ ok: true, pending: summarizePendingPasteMetadata(value) });
+      })
+      .catch(function (error) { sendError(sendResponse, error.message); });
+    return true;
+  }
+
+  if (message.source === PENDING_PASTE_CLEAR) {
+    if (!isTrustedExtensionUiSender(sender)) { sendError(sendResponse, 'untrusted ui sender'); return false; }
+    var clearLocalArea = getLocalArea();
+    if (!clearLocalArea) { sendError(sendResponse, 'storage unavailable'); return false; }
+    queuePendingOperation(async function () {
+      if (message.expectedPendingId !== undefined) await readExpectedPending(clearLocalArea, message);
+      await clearLocalArea.remove(PENDING_PASTE_KEY);
+      clearPendingPasteCleanupAlarm();
+    }).then(function () {
+      sendResponse({ ok: true, cleared: true });
+    }).catch(function (error) {
+      sendError(sendResponse, error.message);
+    });
+    return true;
+  }
+
   // popup 重开时查询该标签页当前进度。
   if (message.source === PROGRESS_QUERY) {
     var queryTabId = Number(message.tabId || 0);
@@ -462,6 +551,10 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     var progressSender = getTrustedDocumentSender(sender);
     if (progressSender && validateProgressMessage(message)) {
       var tabId = progressSender.tabId;
+      if (message.state === 'start' && message.action === protocol.ACTIONS.PASTE) {
+        var session = chrome.storage && chrome.storage.session;
+        if (session) session.remove(protocol.getSnapshotCacheKey(tabId, progressSender.url));
+      }
       if (message.state === 'done') {
         readProgress(tabId, function (record) {
           if (!record || record.requestId === String(message.requestId)) clearProgress(tabId);

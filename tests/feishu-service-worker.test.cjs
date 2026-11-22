@@ -42,6 +42,9 @@ function loadWorker(local, overrides = {}) {
   vm.runInContext(source, context);
   return {
     context,
+    send(message, sender) {
+      return new Promise(resolve => listener(message, sender, resolve));
+    },
     request(op, value) {
       return new Promise(resolve => listener({
         source: protocol.MESSAGES.PENDING_PASTE,
@@ -157,4 +160,57 @@ test('retired pending delete and native image reconciliation operations fail clo
     type: protocol.NATIVE_MESSAGING.REQUEST_TYPE, host: protocol.NATIVE_MESSAGING.HOST_NAME,
     op: 'inspect', action: 'scan', sourceUrl: SOURCE_URL, images: [],
   }).ok, false);
+});
+
+test('popup pending query and clear accept extension UI senders only and return lightweight metadata', async () => {
+  let stored = null;
+  const local = {
+    async get() { return { [KEY]: stored }; },
+    async set(items) { stored = items[KEY]; },
+    async remove() { stored = null; },
+  };
+  const worker = loadWorker(local);
+  const saved = await worker.request('set', {
+    schemaVersion: 1,
+    ts: Date.now(),
+    title: '源文档标题',
+    text: '正文内容',
+    semanticSnapshot: { blockCount: 12, imageCount: 2, whiteboardCount: 1 },
+  });
+  assert.equal(saved.ok, true);
+
+  // Content script / document tab sender must be rejected.
+  const tabSender = { id: 'test-extension', tab: { id: 1, url: SOURCE_URL }, frameId: 0, url: SOURCE_URL };
+  assert.equal((await worker.send({ source: protocol.MESSAGES.PENDING_PASTE_QUERY }, tabSender)).ok, false);
+  assert.equal((await worker.send({ source: protocol.MESSAGES.PENDING_PASTE_CLEAR }, tabSender)).ok, false);
+
+  // Extension UI sender (no sender.tab) receives metadata without raw body/html payload.
+  const uiSender = { id: 'test-extension', url: 'chrome-extension://test-extension/ui/popup.html' };
+  const queried = await worker.send({ source: protocol.MESSAGES.PENDING_PASTE_QUERY }, uiSender);
+  assert.equal(queried.ok, true);
+  assert.equal(queried.pending.title, '源文档标题');
+  assert.equal(queried.pending.savedFromHost, 'example.feishu.cn');
+  assert.equal(queried.pending.summary.blockCount, 12);
+  assert.equal(queried.pending.summary.imageCount, 2);
+  assert.equal(queried.pending.summary.whiteboardCount, 1);
+  assert.equal('text' in queried.pending, false);
+
+  const documentCache = {
+    schemaVersion: 2,
+    pendingId: 'pending-source',
+    ts: Date.now(),
+    text: '正文内容',
+    semanticSnapshot: { blockCount: 0 },
+  };
+  assert.equal((await worker.request('set', { ...documentCache, blockCount: -1 })).ok, false);
+  for (const blockCount of [205, 0]) {
+    assert.equal((await worker.request('set', { ...documentCache, blockCount })).ok, true);
+    const response = await worker.send({ source: protocol.MESSAGES.PENDING_PASTE_QUERY }, uiSender);
+    assert.equal(response.pending.summary.blockCount, blockCount);
+  }
+
+  const cleared = await worker.send({ source: protocol.MESSAGES.PENDING_PASTE_CLEAR }, uiSender);
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.cleared, true);
+  assert.equal((await worker.send({ source: protocol.MESSAGES.PENDING_PASTE_QUERY }, uiSender)).pending, null);
 });

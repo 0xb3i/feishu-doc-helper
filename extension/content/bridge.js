@@ -16,6 +16,9 @@
   // 当前进行中的动作 requestId / 名称，用于把页面进度事件关联到本次操作。
   var activeRequestId = '';
   var activeAction = '';
+  var onActionProgress = null;
+  var expectedPendingId;
+  var panelOpening = false;
   var activeWhiteboardBundleId = '';
   var nativeRequestInFlight = false;
   var lastImageContextGesture = null;
@@ -331,7 +334,7 @@
   document.addEventListener(UI_PROGRESS_EVENT, function (event) {
     if (!activeRequestId) return;
     var detail = (event && event.detail) || {};
-    broadcastProgress({
+    var progress = {
       state: 'progress',
       requestId: activeRequestId,
       action: activeAction,
@@ -339,7 +342,9 @@
       done: protocol.normalizeProgressNumber(detail.done),
       total: protocol.normalizeProgressNumber(detail.total),
       label: protocol.normalizeProgressLabel(detail.label),
-    });
+    };
+    broadcastProgress(progress);
+    if (onActionProgress) onActionProgress(progress);
   }, true);
 
   // 图片跨域抓取桥接：MAIN world 运行时无法直接用 chrome API，通过 DOM 事件
@@ -362,7 +367,7 @@
     if (!validation.ok) { reply({ ok: false, error: validation.error }); return; }
 
     var actionAllowsBatchFetch = Boolean(activeRequestId)
-      && activeAction === protocol.ACTIONS.EXTRACT;
+      && (activeAction === protocol.ACTIONS.EXTRACT || activeAction === protocol.ACTIONS.IMAGES_EXTRACT);
     var gesture = lastImageContextGesture;
     var gestureAllowsFetch = Boolean(gesture)
       && Date.now() - gesture.createdAt <= protocol.LIMITS.IMAGE_GESTURE_TTL_MS
@@ -412,6 +417,7 @@
         action: activeAction,
         actionRequestId: activeRequestId,
         op: op,
+        expectedPendingId: expectedPendingId,
         value: op === protocol.PENDING_OPS.SET ? detail.value : null,
       }, function (response) {
         if (chrome.runtime.lastError) {
@@ -543,26 +549,9 @@
     };
     if (op === protocol.NATIVE_MESSAGING.OPS.INSPECT
       || op === protocol.NATIVE_MESSAGING.OPS.EXPORT) request.sourceUrl = location.href;
-    if (op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT || op === protocol.NATIVE_MESSAGING.OPS.APPLY) {
-      request.bundleId = String(detail.bundleId || '');
-      request.targetUrl = location.href;
-    }
-    if (op === protocol.NATIVE_MESSAGING.OPS.DISCARD) {
-      request.bundleId = String(detail.bundleId || '');
-    }
     var validation = protocol.validateNativeMessagingRequest(request);
     if (!validation.ok) {
       reply({ ok: false, error: validation.error });
-      return;
-    }
-    if ((op === protocol.NATIVE_MESSAGING.OPS.PREFLIGHT || op === protocol.NATIVE_MESSAGING.OPS.APPLY)
-      && (!activeWhiteboardBundleId || request.bundleId !== activeWhiteboardBundleId)) {
-      reply({ ok: false, error: 'whiteboard bundle does not match the active pending paste' });
-      return;
-    }
-    if (op === protocol.NATIVE_MESSAGING.OPS.DISCARD
-      && (!activeWhiteboardBundleId || request.bundleId !== activeWhiteboardBundleId)) {
-      reply({ ok: false, error: 'whiteboard discard does not match the active extract' });
       return;
     }
 
@@ -606,7 +595,7 @@
     }).join('');
   }
 
-  function requestPageAction(message) {
+  function requestPageAction(message, onProgress) {
     return new Promise(function (resolve) {
       var action = String((message && message.action) || '');
       var payloadValidation = protocol.validateActionPayload(message && message.payload);
@@ -614,7 +603,8 @@
         resolve({ status: 'error', error: '当前页面不是受支持的飞书/Lark 文档。' });
         return;
       }
-      if (!protocol.isUiAction(action) || !payloadValidation.ok) {
+      if (!protocol.isUiAction(action) || !payloadValidation.ok
+        || (action === protocol.ACTIONS.IMAGES_EXTRACT && !protocol.validateImageSelection(message.payload))) {
         resolve({ status: 'error', error: payloadValidation.error || '不支持的扩展操作。' });
         return;
       }
@@ -630,11 +620,13 @@
       }
       activeRequestId = requestId;
       activeAction = action;
+      expectedPendingId = message.expectedPendingId;
+      onActionProgress = onProgress || null;
       activeWhiteboardBundleId = '';
       nativeRequestInFlight = false;
 
       // 通知后台：新动作开始（scan 是静默轮询，不广播生命周期）。
-      if (action && action !== 'scan') {
+      if (action && action !== protocol.ACTIONS.SCAN && action !== protocol.ACTIONS.IMAGES) {
         broadcastProgress({ state: 'start', requestId: requestId, action: action });
       }
 
@@ -642,10 +634,12 @@
         if (activeRequestId === requestId) {
           activeRequestId = '';
           activeAction = '';
+          expectedPendingId = undefined;
+          onActionProgress = null;
           activeWhiteboardBundleId = '';
           nativeRequestInFlight = false;
         }
-        if (action && action !== 'scan') {
+        if (action && action !== protocol.ACTIONS.SCAN && action !== protocol.ACTIONS.IMAGES) {
           broadcastProgress({
             state: 'done',
             requestId: requestId,
@@ -658,8 +652,7 @@
         resolve(result);
       }
 
-      var actionTimeoutMs = action === protocol.ACTIONS.EXTRACT || action === protocol.ACTIONS.PASTE
-        || action === protocol.ACTIONS.PREPARE_NATIVE_PASTE ? 10 * 60 * 1000 : 45000;
+      var actionTimeoutMs = action === protocol.ACTIONS.SCAN ? 110000 : 10 * 60 * 1000;
       var timer = setTimeout(function () {
         document.removeEventListener(UI_RESULT_EVENT, onResult, true);
         finish({ status: 'error', error: '页面脚本响应超时，请确认当前标签页是飞书文档。' });
@@ -684,9 +677,62 @@
     });
   }
 
+  async function openImagePanel(message) {
+    if (panelOpening) return { status: 'error', error: '图片面板正在打开' };
+    panelOpening = true;
+    try {
+      var result = await requestPageAction(message);
+      if (result.status !== 'success') return result;
+      var response = await chrome.runtime.sendMessage({ source: protocol.MESSAGES.PENDING_PASTE_PANEL_QUERY });
+      if (!response || !response.ok) throw new Error(response && response.error || '无法读取提取缓存');
+      var pending = response.pending;
+      var documentUrl = location.href.split('#')[0];
+      var images = result.summary.images.map(function (entry, index) {
+        var validation = protocol.validateImageUrl(entry.src, location.href);
+        return Object.assign({}, entry, { index: index, src: validation.ok ? validation.url : '' });
+      }).filter(function (entry) { return entry.src; });
+      globalThis.FDMImagePanel.open({
+        images: images,
+        replaceTitle: pending && pending.title,
+        onExtract: async function (selected, onProgress) {
+          if (location.href.split('#')[0] !== documentUrl) {
+            throw new Error('当前文档已切换，请重新打开图片面板');
+          }
+          var extraction = await requestPageAction({
+            action: protocol.ACTIONS.IMAGES_EXTRACT,
+            expectedPendingId: pending ? pending.pendingId : null,
+            payload: { selection: selected.map(function (entry) {
+              return { index: entry.index, token: entry.token };
+            }) },
+          }, onProgress);
+          if (extraction.status !== 'success') throw new Error(extraction.error || '图片提取失败');
+        },
+      });
+      return { status: 'success', summary: { imageCount: images.length } };
+    } catch (error) {
+      return { status: 'error', error: String(error && error.message || error) };
+    } finally {
+      panelOpening = false;
+    }
+  }
+
+  window.addEventListener('keydown', function (event) {
+    if (!event.isTrusted || event.repeat || !(event.metaKey || event.ctrlKey)
+      || !event.shiftKey || event.key.toLowerCase() !== 'i') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    openImagePanel({ action: protocol.ACTIONS.IMAGES }).then(function (result) {
+      if (result.status !== 'success') console.warn('[Feishu Helper] ' + result.error);
+    });
+  }, true);
+
   chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
-    if (!message || message.source !== SOURCE || !sender || sender.id !== chrome.runtime.id) return false;
-    requestPageAction(message).then(function (result) { sendResponse(result); });
+    if (!message || message.source !== SOURCE || !sender || sender.id !== chrome.runtime.id
+      || message.action === protocol.ACTIONS.IMAGES_EXTRACT) return false;
+    var result = message.action === protocol.ACTIONS.IMAGES
+      ? openImagePanel(message)
+      : requestPageAction(message);
+    result.then(function (value) { sendResponse(value); });
     return true;
   });
 })();

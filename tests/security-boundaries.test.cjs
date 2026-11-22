@@ -259,28 +259,6 @@ test('native messaging requests are operation-scoped and fail closed', () => {
     action: 'extract',
     sourceUrl: DOCUMENT_URL,
   })), { ok: true, op: 'export' });
-  assert.equal(protocol.validateNativeMessagingRequest(makeNativeRequest({
-    op: 'preflight',
-    action: 'paste',
-    bundleId: BUNDLE_ID,
-    targetUrl: DOCUMENT_URL,
-  })).ok, true);
-  assert.equal(protocol.validateNativeMessagingRequest(makeNativeRequest({
-    op: 'apply',
-    action: 'paste',
-    bundleId: BUNDLE_ID,
-    targetUrl: DOCUMENT_URL,
-  })).ok, true);
-  assert.equal(protocol.validateNativeMessagingRequest(makeNativeRequest({
-    op: 'discard',
-    action: 'extract',
-    bundleId: BUNDLE_ID,
-  })).ok, true);
-  assert.equal(protocol.validateNativeMessagingRequest(makeNativeRequest({
-    op: 'discard',
-    action: 'paste',
-    bundleId: BUNDLE_ID,
-  })).ok, false);
 
   [
     { type: 'WRONG', op: 'export', action: 'extract', sourceUrl: DOCUMENT_URL },
@@ -292,12 +270,11 @@ test('native messaging requests are operation-scoped and fail closed', () => {
     { op: 'export', action: 'extract', sourceUrl: new URL(DOCUMENT_URL) },
     { op: 'export', action: 'extract', sourceUrl: DOCUMENT_URL, bundleId: BUNDLE_ID },
     { op: 'export', action: 'extract', sourceUrl: DOCUMENT_URL, targetUrl: null },
+    { op: 'preflight', action: 'paste', bundleId: BUNDLE_ID, targetUrl: DOCUMENT_URL },
+    { op: 'apply', action: 'paste', bundleId: BUNDLE_ID, targetUrl: DOCUMENT_URL },
     { op: 'preflight', action: 'extract', bundleId: BUNDLE_ID, targetUrl: DOCUMENT_URL },
     { op: 'apply', action: 'paste', bundleId: BUNDLE_ID.toUpperCase(), targetUrl: DOCUMENT_URL },
     { op: 'apply', action: 'paste', bundleId: BUNDLE_ID, targetUrl: DOCUMENT_URL, sourceUrl: DOCUMENT_URL },
-    { op: 'discard', action: 'scan', bundleId: BUNDLE_ID },
-    { op: 'discard', action: 'paste', bundleId: BUNDLE_ID, targetUrl: DOCUMENT_URL },
-    { op: 'discard', action: 'paste', bundleId: BUNDLE_ID, sourceUrl: null },
     { op: 'unknown', action: 'paste', bundleId: BUNDLE_ID },
     { op: 'export', action: 'extract', sourceUrl: DOCUMENT_URL, slots: [] },
   ].forEach(function (patch) {

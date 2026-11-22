@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>飞书文档迁移</title>
+    <link rel="stylesheet" href="../shared/base.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="sheet">
+      <!-- 顶栏：极简单行，当前文档名 + 右侧快照时间与中性灰刷新按钮 -->
+      <header class="head" id="head">
+        <h1 class="head-title" id="doc-title">加载中</h1>
+        <div class="head-tools">
+          <span class="head-status" id="doc-status"></span>
+          <span class="head-divider" aria-hidden="true"></span>
+          <button class="icon-btn tip" id="refresh-btn" type="button" disabled aria-label="刷新快照" data-tip="刷新快照">
+            <!-- solar:refresh-linear -->
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M3.68 13v-1.67C3.68 6.73 7.44 3 12.08 3c3.04 0 5.7 1.6 7.17 4M2 11.33 3.68 13l1.68-1.67"
+                stroke-width="1.8"
+              />
+              <path
+                d="M20.31 11v1.67c0 4.6-3.77 8.33-8.43 8.33-3.05 0-5.72-1.6-7.2-4M22 12.67 20.31 11l-1.68 1.67"
+                stroke-width="1.8"
+              />
+            </svg>
+            <span class="stale-dot" aria-hidden="true"></span>
+          </button>
+        </div>
+      </header>
+
+      <!-- 双列雕塑感主操作卡：通透渐变 + 精准对称底纹 + 柔光玻璃方徽 + Solar Bold Duotone 图标 -->
+      <section class="action-grid" aria-label="主要操作">
+        <button class="action-card action-extract" id="extract-btn" type="button" disabled>
+          <span class="card-stage" aria-hidden="true">
+            <svg class="card-motif" viewBox="0 0 144 88">
+              <line x1="46" y1="2" x2="46" y2="86" stroke-dasharray="3.5 4" />
+              <line x1="98" y1="2" x2="98" y2="86" stroke-dasharray="3.5 4" />
+              <line x1="10" y1="18" x2="134" y2="18" stroke-dasharray="3.5 4" />
+              <line x1="10" y1="70" x2="134" y2="70" stroke-dasharray="3.5 4" />
+            </svg>
+            <span class="card-badge">
+              <!-- solar:copy-bold-duotone -->
+              <svg class="glyph icon-idle" viewBox="0 0 24 24">
+                <path
+                  fill="currentColor"
+                  d="M6.6 11.4c0-2.73 0-4.09.84-4.94.85-.85 2.2-.85 4.92-.85h2.88c2.72 0 4.07 0 4.92.85.84.85.84 2.21.84 4.94v4.82c0 2.72 0 4.09-.84 4.93-.85.85-2.2.85-4.92.85h-2.88c-2.72 0-4.07 0-4.92-.85-.84-.84-.84-2.2-.84-4.93V11.4Z"
+                />
+                <path
+                  fill="currentColor"
+                  opacity=".5"
+                  d="M4.17 3.17C3 4.34 3 6.23 3 10v2c0 3.77 0 5.66 1.17 6.83.62.62 1.44.91 2.62 1.05-.19-.84-.19-2-.19-3.66V11.4c0-2.73 0-4.09.84-4.94.85-.85 2.2-.85 4.92-.85h2.88c1.65 0 2.8 0 3.64.19-.14-1.19-.43-2.01-1.05-2.63C16.66 2 14.77 2 11 2 7.23 2 5.34 2 4.17 3.17Z"
+                />
+              </svg>
+              <svg class="icon icon-busy spinner" viewBox="0 0 20 20">
+                <circle cx="10" cy="10" r="6.25" opacity=".28" />
+                <path d="M16.25 10A6.25 6.25 0 0 0 10 3.75" />
+              </svg>
+              <svg class="icon icon-done" viewBox="0 0 20 20">
+                <path d="m4.75 10.25 3.5 3.5 7-7.25" />
+              </svg>
+            </span>
+          </span>
+          <span class="card-copy">
+            <span class="card-title" id="extract-title">提取</span>
+            <span class="card-sub" id="extract-desc"></span>
+          </span>
+          <span class="card-bar" aria-hidden="true">
+            <span class="bar-seg bar-blocks"><i></i></span>
+            <span class="bar-seg bar-images"><i></i></span>
+            <span class="bar-seg bar-confirm"><i></i></span>
+          </span>
+        </button>
+
+        <button class="action-card action-paste" id="paste-btn" type="button" disabled>
+          <span class="card-stage" aria-hidden="true">
+            <svg class="card-motif" viewBox="0 0 144 88">
+              <path d="M38 22V12a2 2 0 0 1 2-2h10M106 22V12a2 2 0 0 0-2-2H94M38 66v10a2 2 0 0 0 2 2h10M106 66v10a2 2 0 0 1-2 2H94" />
+            </svg>
+            <span class="card-badge">
+              <!-- solar:clipboard-text-bold-duotone -->
+              <svg class="glyph icon-idle" viewBox="0 0 24 24">
+                <path
+                  fill="currentColor"
+                  opacity=".5"
+                  d="M21 16v-6c0-2.83 0-4.24-.88-5.12C19.35 4.11 18.18 4.01 16 4H8c-2.18.01-3.35.11-4.12.88C3 5.76 3 7.17 3 10v6c0 2.83 0 4.24.88 5.12C4.76 22 6.17 22 9 22h6c2.83 0 4.24 0 5.12-.88.88-.88.88-2.29.88-5.12Z"
+                />
+                <path
+                  fill="currentColor"
+                  d="M12.5 17.25a.75.75 0 0 1 0 1.5H7a.75.75 0 0 1 0-1.5h5.5ZM15 13.75a.75.75 0 0 1 0 1.5H7a.75.75 0 0 1 0-1.5h8ZM14.5 2A1.5 1.5 0 0 1 16 3.5v1A1.5 1.5 0 0 1 14.5 6h-5A1.5 1.5 0 0 1 8 4.5v-1A1.5 1.5 0 0 1 9.5 2h5Z"
+                />
+              </svg>
+              <svg class="icon icon-busy spinner" viewBox="0 0 20 20">
+                <circle cx="10" cy="10" r="6.25" opacity=".28" />
+                <path d="M16.25 10A6.25 6.25 0 0 0 10 3.75" />
+              </svg>
+              <svg class="icon icon-done" viewBox="0 0 20 20">
+                <path d="m4.75 10.25 3.5 3.5 7-7.25" />
+              </svg>
+            </span>
+          </span>
+          <span class="card-copy">
+            <span class="card-title" id="paste-title">粘贴</span>
+            <span class="card-sub" id="paste-desc"></span>
+          </span>
+          <span class="card-bar" aria-hidden="true">
+            <span class="bar-seg bar-blocks"><i></i></span>
+            <span class="bar-seg bar-images"><i></i></span>
+            <span class="bar-seg bar-confirm"><i></i></span>
+          </span>
+        </button>
+      </section>
+
+      <!-- 缓存槽：去套娃裸图标 + 纯字时间，空态为轻凹虚线槽 -->
+      <section class="cache-row" id="cache-card" aria-label="当前缓存">
+        <span class="cache-slot-icon" aria-hidden="true">
+          <!-- solar:document-text-bold-duotone -->
+          <svg class="slot-svg slot-doc" viewBox="0 0 24 24">
+            <path
+              fill="currentColor"
+              opacity=".32"
+              d="M3 10c0-3.77 0-5.66 1.17-6.83C5.34 2 7.23 2 11 2h2c3.77 0 5.66 0 6.83 1.17C21 4.34 21 6.23 21 10v4c0 3.77 0 5.66-1.17 6.83C18.66 22 16.77 22 13 22h-2c-3.77 0-5.66 0-6.83-1.17C3 19.66 3 17.77 3 14v-4Z"
+            />
+            <path
+              fill="currentColor"
+              d="M13 15.25a.75.75 0 0 1 0 1.5H8a.75.75 0 0 1 0-1.5h5ZM16 11.25a.75.75 0 0 1 0 1.5H8a.75.75 0 0 1 0-1.5h8ZM16 7.25a.75.75 0 0 1 0 1.5H8a.75.75 0 0 1 0-1.5h8Z"
+            />
+          </svg>
+          <!-- solar:gallery-bold-duotone -->
+          <svg class="slot-svg slot-img" viewBox="0 0 24 24">
+            <path
+              fill="currentColor"
+              opacity=".35"
+              d="M2 12c0-4.71 0-7.07 1.46-8.54C4.93 2 7.29 2 12 2s7.07 0 8.54 1.46C22 4.93 22 7.29 22 12s0 7.07-1.46 8.54C19.07 22 16.71 22 12 22s-7.07 0-8.54-1.46C2 19.07 2 16.71 2 12Z"
+            />
+            <circle cx="15.5" cy="8.5" r="2" fill="currentColor" />
+            <path
+              fill="currentColor"
+              d="M20.6 19.15 17.78 16.6a3 3 0 0 0-3.74-.23l-.3.21a2.25 2.25 0 0 1-2.56-.22l-4.29-4.29a2.5 2.5 0 0 0-3.14-.1l-1 .87c0 3.74.16 5.95 1.24 7.16C5.1 21.1 7.45 21.25 12 21.25c4.38 0 6.72-.14 7.98-1.22.24-.22.45-.52.62-.88Z"
+            />
+          </svg>
+          <!-- empty slot -->
+          <svg class="slot-svg slot-empty" viewBox="0 0 16 16">
+            <path
+              d="M3 5.5A2.5 2.5 0 0 1 5.5 3h5A2.5 2.5 0 0 1 13 5.5v5a2.5 2.5 0 0 1-2.5 2.5h-5A2.5 2.5 0 0 1 3 10.5v-5Z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.35"
+              stroke-dasharray="2.4 2.2"
+            />
+            <circle cx="8" cy="8" r="1.1" fill="currentColor" opacity="0.65" />
+          </svg>
+        </span>
+        <span class="cache-title" id="cache-title"></span>
+        <span class="cache-tag" id="cache-pill"></span>
+      </section>
+
+      <div class="feedback" id="feedback" hidden>
+        <span id="feedback-text"></span>
+        <button class="feedback-action" id="clear-btn" type="button" hidden>清空缓存</button>
+      </div>
+
+      <div class="toast popup-toast" id="popup-toast" aria-live="polite"></div>
+
+      <!-- 底部哑光深炭黑锚定按钮：居中克制，一眼稳住整窗重心 -->
+      <button class="images-cta" id="images-btn" type="button" disabled>
+        <span class="images-cta-label" id="images-label">仅提取图片</span>
+        <span class="images-cta-meta" id="images-count"></span>
+      </button>
+    </div>
+
+    <p class="sr-only" id="live" aria-live="polite"></p>
+
+    <script src="../shared/protocol.js"></script>
+    <script src="../shared/image-clipboard.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

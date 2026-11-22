@@ -474,3 +474,43 @@ test('image panel handles deeply nested trees and cyclic view references without
 
   assert.deepEqual(Array.from(images, image => image.token), ['deep-token']);
 });
+
+test('selected image transfer builds a copy containing only selected nested image records', async () => {
+  const first = imageBlock('a', 'same-token');
+  const selected = imageBlock('b', 'same-token');
+  const unselected = imageBlock('c', 'other-token');
+  const root = {
+    record: { id: 'root', snapshot: { type: 'page', children: ['a', 'folder'] } },
+    children: [first, { children: [selected, unselected] }],
+  };
+  const runtime = loadImagePanelRuntime(root);
+  const attribs = require('../lib/feishu-attribs.cjs');
+  const sanitizer = { finalizeHtmlFragment: html => html };
+  const renderer = require('../lib/feishu-block-render.cjs').createBlockRenderer({
+    attribs, sanitizer, docxRecord: runtime.docxRecord, styleCodec: require('../lib/feishu-style-codec.cjs'),
+  });
+  let stored;
+  Object.assign(runtime, {
+    attribs, renderer, sanitizer,
+    getDocumentTitle: () => '源文档',
+    showToast() {},
+    async buildClipboardPayload(content) {
+      const images = runtime.docxRecord.listImageRecords(JSON.parse(content.docxRecord));
+      assert.deepEqual(images.map(entry => entry.recordId), ['b']);
+      assert.match(content.html, /same-token/);
+      assert.doesNotMatch(content.html, /other-token/);
+      return {
+        html: content.html,
+        docxRecord: content.docxRecord,
+        orderedImageBase64List: images.map(({ image }) => ({ ...image, base64: 'data:image/png;base64,AA==' })),
+      };
+    },
+    async setPendingPaste(value) { stored = value; },
+  });
+
+  await runtime.extractSelectedImages([{ index: 1, token: 'same-token' }]);
+  assert.equal(stored.kind, 'images');
+  assert.equal(stored.orderedImageBase64List.length, 1);
+  assert.deepEqual(root.record.snapshot.children, ['a', 'folder']);
+  assert.throws(() => runtime.extractSelectedImages([{ index: 1, token: 'changed' }]), /原文图片已变化/);
+});

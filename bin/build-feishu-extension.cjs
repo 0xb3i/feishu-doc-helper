@@ -6,7 +6,7 @@
 // The extension is fully self-contained.  Maintainable sources live in
 // `lib/feishu-*.cjs` (pure helpers) and `src/feishu-runtime/*` (page runtime);
 // this script inlines them into a single MAIN-world content script and wires
-// up the popup build via Vite.
+// up the static popup and isolated content scripts.
 
 const fs = require('fs');
 const path = require('path');
@@ -193,7 +193,7 @@ function buildManifest(packageJson) {
     },
     action: {
       default_title: '飞书文档助手',
-      default_popup: 'ui/popup.html',
+      default_popup: 'popup/popup.html',
       default_icon: {
         16: 'icons/icon-16.png',
         32: 'icons/icon-32.png',
@@ -213,7 +213,7 @@ function buildManifest(packageJson) {
       },
       {
         matches: MATCHES,
-        js: ['shared/protocol.js', 'shared/image-clipboard.js', 'content/bridge.js'],
+        js: ['shared/protocol.js', 'shared/image-clipboard.js', 'content/image-panel-styles.js', 'content/image-panel.js', 'content/bridge.js'],
         run_at: 'document_start',
       },
     ],
@@ -233,30 +233,9 @@ function buildManifest(packageJson) {
   };
 }
 
-function runViteBuild(outputDir) {
-  const viteBin = path.join(path.dirname(require.resolve('vite/package.json')), 'bin/vite.js');
-  const result = spawnSync(process.execPath, [
-    viteBin,
-    'build',
-    '--config',
-    path.join(ROOT, 'extension/vite.config.mjs'),
-  ], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    env: Object.assign({}, process.env, {
-      FEISHU_EXTENSION_UI_OUT_DIR: path.join(outputDir, 'ui'),
-    }),
-  });
-  if (result.status !== 0) {
-    throw new Error((result.stdout || '') + (result.stderr || ''));
-  }
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-}
-
 function reloadExtensionAfterBuild() {
-  if (process.env.FEISHU_EXTENSION_SKIP_RELOAD === '1') {
-    console.log('[build-feishu-extension] skipped extension reload by FEISHU_EXTENSION_SKIP_RELOAD=1');
+  if (process.env.FEISHU_EXTENSION_RELOAD !== '1' || process.env.FEISHU_EXTENSION_SKIP_RELOAD === '1') {
+    console.log('[build-feishu-extension] extension reload is opt-in');
     return;
   }
 
@@ -281,7 +260,12 @@ function validateBuildOutput(outputDir, expectedVersion) {
     'content/main-world.js',
     'content/bridge.js',
     'background/service-worker.js',
-    'ui/popup.html',
+    'popup/popup.html',
+    'popup/popup.js',
+    'popup/popup.css',
+    'shared/base.css',
+    'content/image-panel.js',
+    'content/image-panel-styles.js',
   ];
   requiredFiles.forEach(function (relativePath) {
     if (!fs.existsSync(path.join(outputDir, relativePath))) {
@@ -327,7 +311,18 @@ function build() {
     ['16', '32', '48', '128'].forEach(function (size) {
       copyFile('extension/icons/icon-' + size + '.png', 'icons/icon-' + size + '.png', stagingDir);
     });
-    runViteBuild(stagingDir);
+    [
+      'extension/popup/popup.html',
+      'extension/popup/popup.js',
+      'extension/popup/popup.css',
+      'extension/shared/base.css',
+      'extension/content/image-panel.js',
+    ].forEach(function (file) { copyFile(file, null, stagingDir); });
+    const panelCss = ['extension/shared/base.css', 'extension/content/image-panel.css']
+      .map(function (file) { return fs.readFileSync(path.join(ROOT, file), 'utf8'); })
+      .join('\n');
+    fs.writeFileSync(path.join(stagingDir, 'content/image-panel-styles.js'),
+      'globalThis.FeishuImagePanelStyles = ' + JSON.stringify(panelCss) + ';\n');
     validateBuildOutput(stagingDir, version);
     replaceBuildOutput(stagingDir);
   } catch (error) {

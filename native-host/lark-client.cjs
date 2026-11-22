@@ -136,22 +136,9 @@ class LarkClient {
     });
   }
 
-  canEditDocument(documentId) {
-    const token = String(documentId || '');
-    if (!/^[A-Za-z0-9_-]{1,256}$/.test(token)) {
-      return Promise.reject(new Error('目标文档 ID 无效'));
-    }
-    return this.run([
-      'drive', 'permission.members', 'auth', '--as', 'user',
-      '--type', 'docx', '--token', token, '--action', 'edit',
-    ]).then(function (envelope) {
-      return envelope && envelope.data && envelope.data.auth_result === true;
-    });
-  }
-
   exportWhiteboard(boardToken) {
     return this.run([
-      'whiteboard', '+export', '--as', 'user', '--whiteboard-token', boardToken, '--output-type', 'raw',
+      'whiteboard', '+query', '--as', 'user', '--whiteboard-token', boardToken, '--output_as', 'raw',
     ]).then(function (envelope) {
       const data = envelope && envelope.data;
       const nodes = data && data.nodes;
@@ -163,89 +150,6 @@ class LarkClient {
         throw new Error('lark-cli 未返回画板 raw nodes');
       }
       return nodes;
-    });
-  }
-
-  downloadMedia(token, outputPath, cwd) {
-    return this.run([
-      'docs', '+media-download', '--as', 'user', '--token', token,
-      '--output', outputPath, '--overwrite',
-    ], { cwd: cwd }).catch(() => this.run([
-      'docs', '+media-preview', '--as', 'user', '--token', token,
-      '--output', outputPath,
-    ], { cwd: cwd }));
-  }
-
-  uploadWhiteboardMedia(options) {
-    const opts = options || {};
-    return this.run([
-      'docs', '+media-upload', '--as', 'user',
-      '--doc-id', opts.documentId,
-      '--parent-node', opts.boardToken,
-      '--parent-type', 'whiteboard',
-      '--file', opts.file,
-    ], { cwd: opts.cwd }).then(function (envelope) {
-      const data = envelope && envelope.data || {};
-      const token = data.file_token || data.token
-        || data.media && (data.media.file_token || data.media.token)
-        || data.file && (data.file.file_token || data.file.token);
-      if (!token) throw new Error('目标画板图片上传成功但未返回 file_token');
-      return String(token);
-    });
-  }
-
-  updateWhiteboard(options) {
-    const opts = options || {};
-    const args = [
-      'whiteboard', '+update', '--as', 'user',
-      '--whiteboard-token', opts.boardToken,
-      '--input_format', 'raw', '--source', '-', '--overwrite',
-      '--idempotent-token', opts.idempotentToken,
-    ];
-    if (opts.dryRun) args.push('--dry-run');
-    return this.run(args, {
-      input: JSON.stringify({ nodes: opts.nodes || [] }),
-      cwd: opts.cwd,
-    }).then(function (envelope) {
-      if (opts.dryRun) {
-        const api = envelope && envelope.data && envelope.data.api;
-        if (!Array.isArray(api) || !api.length
-          || /parse input failed/i.test(String(envelope.data.description || ''))) {
-          throw new Error('画板 raw 数据未通过 lark-cli dry-run 校验');
-        }
-      } else {
-        const data = envelope && envelope.data;
-        // The API currently returns `created_node_ids`, but its value is not a
-        // one-to-one list for every raw node type. Require the documented
-        // acknowledgement field here; completeness is proven separately by a
-        // read-after-write export of the target board.
-        if (!data || !Object.prototype.hasOwnProperty.call(data, 'created_node_ids')) {
-          throw new Error('画板更新未返回节点确认');
-        }
-      }
-      return envelope;
-    });
-  }
-
-  updateDocument(options) {
-    const opts = options || {};
-    const revisionId = Number(opts.revisionId);
-    if (!Number.isInteger(revisionId) || revisionId < 0) {
-      return Promise.reject(new Error('文档结构写入必须绑定已读取的 revision_id'));
-    }
-    const args = [
-      'docs', '+update', '--as', 'user', '--doc', opts.documentUrl,
-      '--command', opts.command, '--block-id', opts.blockId,
-      '--revision-id', String(revisionId),
-    ];
-    if (opts.content != null) args.push('--content', String(opts.content));
-    if (opts.dryRun) args.push('--dry-run');
-    return this.run(args, { cwd: opts.cwd }).then(function (envelope) {
-      const result = envelope && envelope.data && envelope.data.result;
-      if (!opts.dryRun && result !== 'success') {
-        throw new Error('文档更新未完整成功：' + String(result || 'missing_result'));
-      }
-      return envelope;
     });
   }
 }

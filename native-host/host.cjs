@@ -50,7 +50,7 @@ function validateChromeOrigin(config) {
 function validateRequest(config, request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Native 请求格式无效');
   if (request.type !== REQUEST_TYPE || request.host !== config.hostName) throw new Error('Native 请求类型无效');
-  const allowed = new Set(['type', 'host', 'op', 'action', 'bundleId', 'sourceUrl', 'targetUrl']);
+  const allowed = new Set(['type', 'host', 'op', 'action', 'sourceUrl']);
   Object.keys(request).forEach(function (key) {
     if (!allowed.has(key)) throw new Error('Native 请求包含不支持的字段');
   });
@@ -59,35 +59,18 @@ function validateRequest(config, request) {
     || !hasOwn.call(request, 'op') || !hasOwn.call(request, 'action')) {
     throw new Error('Native 请求信封不完整');
   }
-  const hasBundleId = hasOwn.call(request, 'bundleId');
   const hasSourceUrl = hasOwn.call(request, 'sourceUrl');
-  const hasTargetUrl = hasOwn.call(request, 'targetUrl');
   if (request.op === 'inspect') {
     if (request.action !== 'scan' || !hasSourceUrl || !transfer.isSupportedDocumentUrl(request.sourceUrl)
-      || hasBundleId || hasTargetUrl) {
+      || hasOwn.call(request, 'bundleId') || hasOwn.call(request, 'targetUrl')) {
       throw new Error('Native inspect 请求无效');
     }
     return;
   }
   if (request.op === 'export') {
     if (request.action !== 'extract' || !hasSourceUrl || !transfer.isSupportedDocumentUrl(request.sourceUrl)
-      || hasBundleId || hasTargetUrl) {
+      || hasOwn.call(request, 'bundleId') || hasOwn.call(request, 'targetUrl')) {
       throw new Error('Native export 请求无效');
-    }
-    return;
-  }
-  if (request.op === 'preflight' || request.op === 'apply') {
-    if (request.action !== 'paste' || !hasBundleId || !transfer.BUNDLE_ID_RE.test(String(request.bundleId || ''))
-      || !hasTargetUrl || !transfer.isSupportedDocumentUrl(request.targetUrl) || hasSourceUrl) {
-      throw new Error('Native 目标请求无效');
-    }
-    return;
-  }
-  if (request.op === 'discard') {
-    if (request.action !== 'extract' || !hasBundleId
-      || !transfer.BUNDLE_ID_RE.test(String(request.bundleId || ''))
-      || hasSourceUrl || hasTargetUrl) {
-      throw new Error('Native discard 请求无效');
     }
     return;
   }
@@ -120,12 +103,6 @@ function createHandler(config) {
     validateRequest(config, request);
     if (request.op === 'inspect') return serviceFor(request.sourceUrl).inspectSource(request.sourceUrl);
     if (request.op === 'export') return serviceFor(request.sourceUrl).exportSource(request.sourceUrl);
-    if (request.op === 'preflight') return serviceFor(request.targetUrl).preflight(request.bundleId, request.targetUrl);
-    if (request.op === 'apply') return serviceFor(request.targetUrl).apply(request.bundleId, request.targetUrl);
-    if (request.op === 'discard') {
-      store.discard(request.bundleId);
-      return { discarded: true };
-    }
     throw new Error('Native 请求操作不受支持');
   };
 }

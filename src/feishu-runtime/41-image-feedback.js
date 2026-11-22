@@ -1,24 +1,31 @@
   // ── Single-image action feedback ───────────────────────────────────────────
 
-  // Ant Design message 风格的页面内轻提示，用于右击"复制图片"等纯页面操作的反馈。
+  // 轻盈磨砂胶囊风格的页面内轻提示，用于右击"复制图片"等纯页面操作的反馈。
   function ensureImageMessageStyles() {
     if (document.getElementById('__feishu_image_message_styles__')) return;
     var style = document.createElement('style');
     style.id = '__feishu_image_message_styles__';
     style.textContent = [
-      '.feishu-msg__wrap{position:fixed;top:16px;left:0;right:0;z-index:2147483601;display:flex;',
+      '.feishu-msg__wrap{position:fixed;top:18px;left:0;right:0;z-index:2147483601;display:flex;',
       'flex-direction:column;align-items:center;gap:8px;pointer-events:none;',
-      'font-family:"PingFang SC","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}',
-      '.feishu-msg{display:inline-flex;align-items:center;gap:8px;max-width:80vw;padding:9px 12px;',
-      'background:#fff;border-radius:8px;color:rgba(0,0,0,0.88);font-size:14px;line-height:1.5;',
-      'box-shadow:0 6px 16px 0 rgba(0,0,0,0.08),0 3px 6px -4px rgba(0,0,0,0.12),0 9px 28px 8px rgba(0,0,0,0.05);',
-      'pointer-events:auto;opacity:0;transform:translateY(-8px);transition:opacity .24s ease,transform .24s ease;}',
+      'font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;}',
+      '.feishu-msg{display:inline-flex;align-items:center;gap:8px;max-width:min(420px,84vw);padding:8px 14px;',
+      'background:rgba(255,255,255,0.94);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);',
+      'border:1px solid rgba(18,18,24,0.065);border-radius:999px;color:#16161a;font-size:13px;font-weight:500;line-height:18px;',
+      'box-shadow:0 8px 20px -6px rgba(18,18,24,0.12),0 2px 6px rgba(18,18,24,0.04);',
+      'pointer-events:auto;opacity:0;transform:translateY(-6px);transition:opacity .2s cubic-bezier(.22,1,.36,1),transform .2s cubic-bezier(.22,1,.36,1);}',
       '.feishu-msg--show{opacity:1;transform:translateY(0);}',
-      '.feishu-msg__icon{flex:0 0 16px;width:16px;height:16px;display:inline-flex;}',
-      '.feishu-msg__icon svg{width:16px;height:16px;}',
-      '.feishu-msg--loading .feishu-msg__icon{color:#1677ff;animation:feishu-msg-spin 1s linear infinite;}',
-      '.feishu-msg--success .feishu-msg__icon{color:#52c41a;}',
-      '.feishu-msg--error .feishu-msg__icon{color:#ff4d4f;}',
+      '.feishu-msg__icon{flex:0 0 15px;width:15px;height:15px;display:inline-flex;}',
+      '.feishu-msg__icon svg{width:15px;height:15px;}',
+      '.feishu-msg--loading .feishu-msg__icon{color:#5b6ff9;animation:feishu-msg-spin .9s linear infinite;}',
+      '.feishu-msg--success .feishu-msg__icon{color:#1ea866;}',
+      '.feishu-msg--error{background:rgba(254,246,231,0.96);border-color:rgba(217,119,6,0.18);color:#9a5204;}',
+      '.feishu-msg--error .feishu-msg__icon{color:#d97706;}',
+      '@media (prefers-color-scheme:dark){',
+      '.feishu-msg{background:rgba(28,28,34,0.92);border-color:rgba(255,255,255,0.09);color:#f4f4f8;',
+      'box-shadow:0 10px 24px -6px rgba(0,0,0,0.48);}',
+      '.feishu-msg--error{background:rgba(48,36,20,0.94);border-color:rgba(245,158,11,0.28);color:#fbbf24;}',
+      '}',
       '@keyframes feishu-msg-spin{100%{transform:rotate(360deg);}}',
     ].join('');
     document.head.appendChild(style);

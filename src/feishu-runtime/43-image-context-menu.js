@@ -179,15 +179,3 @@
     e.preventDefault();
     openImageMenu(e.clientX, e.clientY, info);
   }, true);
-
-  registerEventListener(window, 'keydown', function (e) {
-    if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
-    var k = e.key.toLowerCase();
-    if (k === 'i') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      var images = extractImages();
-      if (!images.length) showImageMessage('error', '当前页面未找到图片', 2500);
-      else createImagePanel(images);
-    }
-  }, true);

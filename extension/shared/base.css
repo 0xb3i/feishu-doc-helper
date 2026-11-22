@@ -1,0 +1,387 @@
+/* 弹出窗与图片浮层共用的视觉变量与基础控件（v3：纯净留白 + 柔光玻璃触感） */
+
+:root,
+:host {
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", sans-serif;
+
+  /* 纯白主表面与极轻中性层 */
+  --surface: #ffffff;
+  --surface-soft: #f7f7f9;
+  --surface-hover: #f2f2f5;
+  --surface-press: #e9e9ee;
+
+  --ink-1: #16161a;
+  --ink-2: #55555e;
+  --ink-3: #8a8a93;
+  --ink-4: #b5b5be;
+
+  --border-hair: rgba(18, 18, 24, 0.075);
+  --border-mid: rgba(18, 18, 24, 0.11);
+  --focus: rgba(91, 111, 249, 0.42);
+
+  /* 全界面仅两个主语义色：通透靛蓝（提取）与糖果柔粉（粘贴） */
+  --indigo: #5b6ff9;
+  --indigo-soft: #eef0ff;
+  --indigo-ink: #4658e0;
+
+  --rose: #fa52a9;
+  --rose-soft: #fff0f8;
+  --rose-ink: #d9388c;
+
+  /* 仅过期态局部提示 */
+  --warn: #d97706;
+  --warn-soft: #fef6e7;
+  --warn-ink: #a15405;
+
+  /* 哑光深炭黑锚定按钮 */
+  --anchor-bg: #1f1f23;
+  --anchor-hover: #2a2a30;
+  --anchor-ink: #ffffff;
+  --anchor-muted: rgba(255, 255, 255, 0.56);
+
+  /* 宽幅丝滑漫反射阴影 */
+  --shadow-anchor: 0 12px 24px -8px rgba(18, 18, 24, 0.3), 0 2px 6px rgba(18, 18, 24, 0.1);
+  --shadow-anchor-hover: 0 16px 28px -8px rgba(18, 18, 24, 0.38), 0 3px 8px rgba(18, 18, 24, 0.14);
+  --shadow-tile: 0 0 0 1px rgba(18, 18, 24, 0.04), 0 4px 14px -4px rgba(18, 18, 24, 0.06);
+  --shadow-tile-hover: 0 0 0 1px rgba(18, 18, 24, 0.065), 0 12px 26px -8px rgba(18, 18, 24, 0.11);
+  --shadow-float: 0 0 0 1px rgba(18, 18, 24, 0.05), 0 8px 24px -6px rgba(18, 18, 24, 0.08),
+    0 32px 68px -20px rgba(18, 18, 24, 0.22);
+
+  /* 圆角 */
+  --r-s: 10px;
+  --r-m: 15px;
+  --r-l: 20px;
+  --r-xl: 24px;
+
+  --t-fast: 140ms;
+  --t-base: 220ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root,
+  :host {
+    --surface: #18181d;
+    --surface-soft: #212128;
+    --surface-hover: #282831;
+    --surface-press: #30303b;
+
+    --ink-1: #f4f4f8;
+    --ink-2: #b4b4c0;
+    --ink-3: #838391;
+    --ink-4: #565664;
+
+    --border-hair: rgba(255, 255, 255, 0.08);
+    --border-mid: rgba(255, 255, 255, 0.13);
+    --focus: rgba(124, 140, 255, 0.52);
+
+    --indigo: #7284ff;
+    --indigo-soft: rgba(114, 132, 255, 0.16);
+    --indigo-ink: #a2afff;
+
+    --rose: #ff6cb9;
+    --rose-soft: rgba(255, 108, 185, 0.16);
+    --rose-ink: #ff9ed2;
+
+    --warn: #f59e0b;
+    --warn-soft: rgba(245, 158, 11, 0.16);
+    --warn-ink: #fbbf24;
+
+    --anchor-bg: #f3f3f7;
+    --anchor-hover: #ffffff;
+    --anchor-ink: #16161a;
+    --anchor-muted: rgba(22, 22, 26, 0.56);
+
+    --shadow-anchor: 0 12px 24px -8px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.32);
+    --shadow-anchor-hover: 0 16px 28px -8px rgba(0, 0, 0, 0.65), 0 3px 8px rgba(0, 0, 0, 0.4);
+    --shadow-tile: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 4px 14px -4px rgba(0, 0, 0, 0.35);
+    --shadow-tile-hover: 0 0 0 1px rgba(255, 255, 255, 0.11), 0 12px 26px -8px rgba(0, 0, 0, 0.55);
+    --shadow-float: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 12px 32px rgba(0, 0, 0, 0.5),
+      0 32px 68px -20px rgba(0, 0, 0, 0.72);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+::selection {
+  background: rgba(91, 111, 249, 0.18);
+  color: var(--ink-1);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* 通用次级按钮 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink-1);
+  font-size: 13.5px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: inset 0 0 0 1px var(--border-mid);
+  transition: background-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+
+.btn .icon {
+  width: 15px;
+  height: 15px;
+  color: var(--ink-2);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-soft);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--surface-press);
+  transform: scale(0.985);
+}
+
+.btn:disabled {
+  background: var(--surface-soft);
+  color: var(--ink-4);
+  box-shadow: inset 0 0 0 1px var(--border-hair);
+}
+
+.btn:disabled .icon {
+  color: var(--ink-4);
+}
+
+/* 哑光深炭黑主按钮 */
+.btn-primary {
+  background: var(--anchor-bg);
+  color: var(--anchor-ink);
+  font-weight: 500;
+  box-shadow: var(--shadow-anchor);
+}
+
+.btn-primary .icon {
+  color: currentColor;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--anchor-hover);
+  box-shadow: var(--shadow-anchor-hover);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.btn-primary:disabled {
+  background: var(--surface-soft);
+  color: var(--ink-4);
+  box-shadow: inset 0 0 0 1px var(--border-hair);
+  transform: none;
+}
+
+.btn:focus-visible,
+.icon-btn:focus-visible,
+.text-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* 统一中性灰工具图标按钮（轻细线，Hover 变深） */
+.icon-btn {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  color: var(--ink-3);
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+    transform var(--t-fast) var(--ease);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--ink-1);
+}
+
+.icon-btn:active:not(:disabled) {
+  background: var(--surface-press);
+  transform: scale(0.93);
+}
+
+.icon-btn:disabled {
+  color: var(--ink-4);
+}
+
+.text-btn {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+
+.text-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--ink-1);
+}
+
+.text-btn:disabled {
+  color: var(--ink-4);
+}
+
+/* 悬停提示 */
+.tip {
+  position: relative;
+}
+
+.tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 20;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: var(--ink-1);
+  color: var(--surface);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.14);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-2px);
+  pointer-events: none;
+  transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+
+.tip:hover::after,
+.tip:focus-visible::after {
+  opacity: 1;
+  transform: none;
+  transition-delay: 280ms;
+}
+
+/* 轻提示：保留简洁胶囊结构，去阴影、偏正警示红微调，正文保持深石墨清晰可读 */
+.toast {
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 15px;
+  border: 1px solid rgba(220, 38, 38, 0.18);
+  border-radius: var(--r-m);
+  background: #fff5f5;
+  color: var(--ink-1);
+  box-shadow: none;
+  font: 500 12.5px/18px var(--font);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  animation: toast-enter var(--t-fast) var(--ease) both;
+}
+
+.toast:empty {
+  display: none;
+}
+
+.toast::before {
+  content: "";
+  flex: none;
+  width: 18px;
+  height: 18px;
+  background: center / 17px 17px no-repeat
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%23dc2626' fill-opacity='.16'/%3E%3Cpath fill='%23dc2626' d='M12 7.25a.9.9 0 0 1 .9.9v4.6a.9.9 0 0 1-1.8 0v-4.6a.9.9 0 0 1 .9-.9Zm0 8.95a1.1 1.1 0 1 1 0-2.2 1.1 1.1 0 0 1 0 2.2Z'/%3E%3C/svg%3E");
+}
+
+@media (prefers-color-scheme: dark) {
+  .toast {
+    border-color: rgba(248, 113, 113, 0.26);
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--ink-1);
+  }
+
+  .toast::before {
+    background: center / 17px 17px no-repeat
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='10' fill='%23f87171' fill-opacity='.24'/%3E%3Cpath fill='%23fca5a5' d='M12 7.25a.9.9 0 0 1 .9.9v4.6a.9.9 0 0 1-1.8 0v-4.6a.9.9 0 0 1 .9-.9Zm0 8.95a1.1 1.1 0 1 1 0-2.2 1.1 1.1 0 0 1 0 2.2Z'/%3E%3C/svg%3E");
+  }
+}
+
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  animation: spin 850ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+
+  .spinner {
+    animation: none;
+  }
+}

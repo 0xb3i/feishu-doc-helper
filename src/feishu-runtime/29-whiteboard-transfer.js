@@ -778,22 +778,6 @@
     });
   }
 
-  function requestWhiteboardPreflight(transfer) {
-    if (!isValidWhiteboardTransfer(transfer)) return Promise.reject(new Error('画板迁移元数据无效'));
-    return requestWhiteboardNative('preflight', {
-      bundleId: transfer.bundleId,
-      targetUrl: location.href,
-    }, 90000);
-  }
-
-  function requestWhiteboardApply(transfer) {
-    if (!isValidWhiteboardTransfer(transfer)) return Promise.reject(new Error('画板迁移元数据无效'));
-    return requestWhiteboardNative('apply', {
-      bundleId: transfer.bundleId,
-      targetUrl: location.href,
-    }, 300000);
-  }
-
   function replaceWhiteboardResourceKeys(pageDetail, uploadedAssets) {
     var clone = JSON.parse(JSON.stringify(pageDetail));
     function visit(value) {
@@ -1126,12 +1110,4 @@
           + '；画板回滚失败：' + String(rollbackError && rollbackError.message || rollbackError));
       });
     });
-  }
-
-  function requestWhiteboardDiscard(transfer, action) {
-    if (!isValidWhiteboardTransfer(transfer)) return Promise.resolve(false);
-    return requestWhiteboardNative('discard', {
-      bundleId: transfer.bundleId,
-      action: String(action || 'extract'),
-    }, 30000).then(function () { return true; }).catch(function () { return false; });
   }

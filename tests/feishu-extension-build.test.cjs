@@ -9,7 +9,7 @@ const DIST = path.join(ROOT, 'dist/feishu-extension');
 const PACKAGE_VERSION = require('../package.json').version;
 
 function runExtensionBuild() {
-  return spawnSync('npm', ['run', 'build:feishu:extension'], {
+  return spawnSync('npm', ['run', 'build'], {
     cwd: ROOT,
     encoding: 'utf8',
     env: Object.assign({}, process.env, { FEISHU_EXTENSION_SKIP_RELOAD: '1' }),
@@ -28,19 +28,19 @@ before(() => {
   artifacts.bridge = fs.readFileSync(path.join(DIST, 'content/bridge.js'), 'utf8');
   artifacts.imageClipboard = fs.readFileSync(path.join(DIST, 'shared/image-clipboard.js'), 'utf8');
   artifacts.serviceWorker = fs.readFileSync(path.join(DIST, 'background/service-worker.js'), 'utf8');
-  artifacts.popupHtml = fs.readFileSync(path.join(DIST, 'ui/popup.html'), 'utf8');
-  artifacts.popupJs = fs.readFileSync(path.join(DIST, 'ui/assets/popup.js'), 'utf8');
-  artifacts.popupCss = fs.readFileSync(path.join(DIST, 'ui/assets/popup.css'), 'utf8');
-  artifacts.popupSource = fs.readFileSync(path.join(ROOT, 'extension/ui/popup.jsx'), 'utf8');
+  artifacts.popupHtml = fs.readFileSync(path.join(DIST, 'popup/popup.html'), 'utf8');
+  artifacts.popupJs = fs.readFileSync(path.join(DIST, 'popup/popup.js'), 'utf8');
+  artifacts.popupCss = fs.readFileSync(path.join(DIST, 'popup/popup.css'), 'utf8');
+  artifacts.popupSource = fs.readFileSync(path.join(ROOT, 'extension/popup/popup.js'), 'utf8');
 });
 
-test('build:feishu:extension emits a loadable MV3 extension with a popup dashboard menu', () => {
+test('build emits a loadable MV3 extension with a popup dashboard menu', () => {
   const manifest = artifacts.manifest;
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.minimum_chrome_version, '111');
   assert.equal(manifest.version, PACKAGE_VERSION);
   assert.equal(manifest.name, '飞书文档助手');
-  assert.equal(manifest.action.default_popup, 'ui/popup.html');
+  assert.equal(manifest.action.default_popup, 'popup/popup.html');
   assert.equal(manifest.side_panel, undefined);
   assert.deepEqual(manifest.permissions.sort(), [
     'alarms', 'clipboardRead', 'clipboardWrite', 'commands', 'contextMenus',
@@ -68,7 +68,8 @@ test('build:feishu:extension emits a loadable MV3 extension with a popup dashboa
   }));
   const isolatedScripts = manifest.content_scripts.find(function (entry) { return !entry.world; }).js;
   assert.deepEqual(isolatedScripts, [
-    'shared/protocol.js', 'shared/image-clipboard.js', 'content/bridge.js',
+    'shared/protocol.js', 'shared/image-clipboard.js', 'content/image-panel-styles.js',
+    'content/image-panel.js', 'content/bridge.js',
   ]);
 
   [
@@ -77,17 +78,20 @@ test('build:feishu:extension emits a loadable MV3 extension with a popup dashboa
     'shared/protocol.js',
     'shared/image-clipboard.js',
     'background/service-worker.js',
-    'ui/popup.html',
-    'ui/assets/popup.js',
-    'ui/assets/popup.css',
+    'popup/popup.html',
+    'popup/popup.js',
+    'popup/popup.css',
+    'shared/base.css',
+    'content/image-panel.js',
+    'content/image-panel-styles.js',
   ].forEach(function (relativePath) {
     assert.ok(fs.existsSync(path.join(DIST, relativePath)), relativePath + ' should exist');
   });
 
-  assert.match(artifacts.popupHtml, /assets\/popup\.js/);
-  assert.match(artifacts.popupHtml, /assets\/popup\.css/);
-  ['提取文档', '粘贴副本', '图片', '快照'].forEach(function (label) {
-    assert.ok(artifacts.popupJs.includes(label), label + ' should be rendered by the popup');
+  assert.match(artifacts.popupHtml, /src="popup\.js"/);
+  assert.match(artifacts.popupHtml, /href="popup\.css"/);
+  ['提取', '粘贴', '仅提取图片', '刷新快照'].forEach(function (label) {
+    assert.ok(artifacts.popupHtml.includes(label), label + ' should be rendered by the popup');
   });
   assert.ok(artifacts.popupCss.length > 0, 'popup stylesheet should not be empty');
   assert.doesNotMatch(manifest.name, /ant/i);
@@ -96,11 +100,11 @@ test('build:feishu:extension emits a loadable MV3 extension with a popup dashboa
   assert.doesNotMatch(artifacts.mainWorld, /__FEISHU_HELPER_VERSION__/);
 });
 
-test('extension build auto-reloads the unpacked browser extension when available', () => {
+test('extension build supports opt-in reload of the unpacked browser extension', () => {
   const buildScript = fs.readFileSync(path.join(ROOT, 'bin/build-feishu-extension.cjs'), 'utf8');
   const reloadScript = fs.readFileSync(path.join(ROOT, 'bin/reload-feishu-extension.cjs'), 'utf8');
 
-  assert.match(buildScript, /FEISHU_EXTENSION_SKIP_RELOAD/);
+  assert.match(buildScript, /FEISHU_EXTENSION_RELOAD !== '1'/);
   assert.match(buildScript, /reload-feishu-extension\.cjs/);
   assert.match(reloadScript, /chrome\.runtime\.reload\(\)/);
   assert.match(reloadScript, /chrome:\/\/extensions/);
@@ -110,7 +114,7 @@ test('extension bridge exposes first-class UI actions instead of simulating shor
   assert.match(artifacts.mainWorld, /feishu-helper:ui-action/);
   assert.match(artifacts.bridge, /chrome\.runtime\.onMessage\.addListener/);
   assert.match(artifacts.bridge, /protocol\.DOM_EVENTS\.UI_ACTION/);
-  assert.match(artifacts.popupJs, /FEISHU_EXTENSION_UI/);
+  assert.match(artifacts.popupJs, /source: MESSAGES.UI, action/);
 });
 
 test('pending paste is shared through extension storage and missing cache fails visibly', () => {
@@ -125,16 +129,13 @@ test('whiteboard transfer uses scoped Native Messaging with immutable source han
   assert.match(artifacts.serviceWorker, /chrome\.runtime\.sendNativeMessage/);
   assert.match(artifacts.mainWorld, /requestWhiteboardExport\(\)/);
   assert.match(artifacts.mainWorld, /requestDocumentInspect\(\)/);
-  assert.match(artifacts.mainWorld, /requestWhiteboardPreflight\(transfer\)/);
-  assert.match(artifacts.mainWorld, /requestWhiteboardApply\(transfer\)/);
-  assert.match(
-    artifacts.mainWorld,
-    /hasBrowserWhiteboardPayload\(transfer\)\s+\? requestBrowserWhiteboardPreflight\(transfer\)/
-  );
+  assert.match(artifacts.mainWorld, /requestBrowserWhiteboardPreflight\(transfer\)/);
+  assert.match(artifacts.mainWorld, /applyBrowserWhiteboards\(transfer\)/);
+  assert.doesNotMatch(artifacts.mainWorld, /requestWhiteboard(?:Preflight|Apply)\(transfer\)/);
   assert.match(artifacts.mainWorld, /cloneBlockTreeWithWhiteboardMarkers/);
   assert.match(artifacts.mainWorld, /canonical pending 永远保持源租户数据不变/);
   assert.ok(artifacts.popupSource.includes('画板'));
-  assert.match(artifacts.serviceWorker, /完全退出并重新打开 Chrome \/ Chrome Canary/);
+  assert.match(artifacts.serviceWorker, /完全退出并重新打开 Chrome 后重试/);
 });
 
 test('image metrics use the same docx record source as paste payloads', () => {
@@ -184,7 +185,7 @@ test('binary image clipboard writes use whichever extension context currently ow
   assert.match(artifacts.bridge, /protocol\.MESSAGES\.CLIPBOARD_WRITE/);
   assert.match(artifacts.bridge, /document\.hasFocus\(\)/);
   assert.match(artifacts.serviceWorker, /writeImageClipboardFocusedContext/);
-  assert.match(artifacts.popupSource, /handleFocusedClipboardWrite/);
+  assert.match(artifacts.popupSource, /MESSAGES.CLIPBOARD_WRITE_TARGET/);
   assert.match(artifacts.popupSource, /document\.hasFocus\(\)/);
   assert.doesNotMatch(artifacts.serviceWorker, /ensureOffscreenClipboardDocument/);
   assert.match(artifacts.bridge, /writeImageBlobPromise\(blobPromise\)/);
@@ -240,9 +241,9 @@ test('paste flow focuses the document body after writing the title', () => {
   assert.match(artifacts.mainWorld, /目标文档正文编辑器尚未就绪/);
 });
 
-test('successful extraction detail does not duplicate the status icon with an emoji', () => {
-  assert.match(artifacts.mainWorld, /var toastMsg = '已提取 '/);
-  assert.doesNotMatch(artifacts.mainWorld, /var toastMsg = '✅ 已提取 '/);
+test('whiteboard counts appear in card statistics without a duplicate extraction summary', () => {
+  assert.match(artifacts.popupSource, /counts\.push\(\[summary\.whiteboardCount, '画板'\]\)/);
+  assert.doesNotMatch(artifacts.mainWorld, /'已提取 ' \+ officialBlockCount/);
 });
 
 test('image conversion uses the shared concurrency pool and image paste has one registration path', () => {
@@ -251,33 +252,20 @@ test('image conversion uses the shared concurrency pool and image paste has one 
   assert.doesNotMatch(artifacts.mainWorld, /function uploadAllImages|function startImageInjectionObserver/);
 });
 
-test('popup renders one authoritative progress state for counted and uncounted phases', () => {
-  assert.match(artifacts.popupSource, /function createProgressState/);
-  assert.match(artifacts.popupSource, /indeterminate: normalizedTotal <= 0/);
-  assert.match(artifacts.popupSource, /setProgress\(createProgressState\(message\.phase, label, done, total\)\)/);
-  assert.match(artifacts.popupSource, /setLastResult\(null\)/);
-  assert.match(artifacts.popupSource, /!runningAction && \(status\.type !== 'info' \|\| lastResult\)/);
-  assert.match(artifacts.popupCss, /\.progress__fill--indeterminate/);
+test('popup shows counted and indeterminate progress and resumes via the service worker', () => {
+  assert.match(artifacts.popupSource, /message\(MESSAGES.PROGRESS_QUERY/);
+  assert.match(artifacts.popupSource, /progressRevision/);
+  assert.match(artifacts.popupSource, /total \? `\$\{label\} \$\{done\}\/\$\{total\}` : label/);
   assert.match(artifacts.popupCss, /@keyframes progress-indeterminate/);
-  assert.doesNotMatch(artifacts.popupSource, /if \(total <= 0\) return/);
+  assert.doesNotMatch(artifacts.popupSource, /SCENARIOS|fdm:images-extracted|requestAnimationFrame/);
 });
 
-test('popup automatically scans once per page session and refreshes only on manual snapshot', () => {
-  assert.match(artifacts.popupSource, /state: 'loading', summary: null/);
-  assert.match(artifacts.popupSource, /快照提取中…/);
-  assert.match(artifacts.popupSource, /normalizeOfficialSummary/);
-  assert.match(artifacts.popupSource, /scanEpochRef\.current !== epoch/);
-  assert.match(artifacts.popupSource, /const SNAPSHOT_CACHE_PREFIX = 'feishu-snapshot:'/);
+test('popup reuses a session snapshot and reads real summaries on refresh', () => {
   assert.match(artifacts.popupSource, /chrome\.storage\.session\.get\(key\)/);
-  assert.match(artifacts.popupSource, /chrome\.storage\.session\.set\(value\)/);
-  assert.match(artifacts.popupSource, /return loadSnapshotCache\(parsed\)\.then/);
-  assert.match(artifacts.popupSource, /if \(summary\) \{/);
-  assert.match(artifacts.popupSource, /return scanMetrics\(parsed\)\.catch/);
-  assert.match(artifacts.popupSource, /function refreshSnapshot\(\)/);
-  assert.match(artifacts.popupSource, /scanMetrics\(target\)\.then/);
-  assert.match(artifacts.popupSource, /sendFeishuActionToTab\(tab, 'scan'\)/);
-  assert.doesNotMatch(artifacts.popupSource, /refreshTarget\(\)/);
-  assert.doesNotMatch(artifacts.popupSource, /setMetrics\(/);
+  assert.match(artifacts.popupSource, /chrome\.storage\.session\.set\(/);
+  assert.match(artifacts.popupSource, /manual \|\| !saved/);
+  assert.match(artifacts.popupSource, /await sendAction\('scan'\)/);
+  assert.match(artifacts.popupSource, /Number\.isInteger\(summary\?\.\[key\]\)/);
 });
 
 test('embedded charts are captured as structured image fallbacks without changing whiteboard handling', () => {
@@ -340,12 +328,12 @@ test('browser whiteboard import binds InsertPage to the newly created target boa
 });
 
 test('popup keeps the action response authoritative over an early progress done message', () => {
-  assert.match(artifacts.popupSource, /const localActionRef = useRef\(null\)/);
-  assert.match(artifacts.popupSource, /if \(localAction && localAction\.action === message\.action\) return/);
-  assert.match(artifacts.popupSource, /const isError = !result \|\| result\.status !== 'success'/);
+  assert.match(artifacts.popupSource, /state.task = \{ action, local: true \}/);
+  assert.match(artifacts.popupSource, /if \(current\?\.local\) return/);
+  assert.match(artifacts.popupSource, /result\?\.status !== 'success'/);
   assert.match(artifacts.bridge, /error: protocol\.normalizeProgressLabel\(result && result\.error\)/);
   assert.match(artifacts.bridge, /notice: protocol\.normalizeProgressLabel\(result && result\.notice\)/);
-  assert.match(artifacts.popupSource, /const text = summarizeResult\(action, result\)/);
+  assert.match(artifacts.popupSource, /await finish\(action, result.notice\)/);
   assert.doesNotMatch(artifacts.popupSource, /notice \|\| summarizeResult\(action, result\)/);
 });
 

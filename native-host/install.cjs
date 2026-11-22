@@ -20,7 +20,6 @@ const LAUNCHER_PATH = path.join(APP_SUPPORT, 'feishu-doc-helper-native-host');
 const NATIVE_MANIFEST_NAME = protocol.NATIVE_MESSAGING.HOST_NAME + '.json';
 const NATIVE_MANIFEST_DIRS = [
   path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts'),
-  path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome Canary', 'NativeMessagingHosts'),
   path.join(os.homedir(), 'Library', 'Application Support', 'Microsoft Edge', 'NativeMessagingHosts'),
 ];
 const RUNTIME_FILES = [

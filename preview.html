@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>飞书文档迁移 · 交互预览</title>
+    <link rel="stylesheet" href="extension/shared/base.css" />
+    <style>
+      body {
+        min-height: 100vh;
+        font: 13px/1.5 var(--font);
+        background: #eaebf0;
+        color: var(--ink-1);
+        -webkit-font-smoothing: antialiased;
+        display: flex;
+        flex-direction: column;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #0e0f13;
+        }
+
+        .controls button:hover {
+          background: rgba(255, 255, 255, 0.08) !important;
+        }
+      }
+
+      /* 预览控制条（不属于插件界面） */
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 12px 20px;
+        font-size: 12px;
+        color: var(--ink-2);
+        flex-wrap: wrap;
+      }
+
+      .controls .label {
+        margin-right: 6px;
+        font-weight: 500;
+        color: var(--ink-3);
+      }
+
+      .controls button {
+        height: 28px;
+        padding: 0 11px;
+        border-radius: 99px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--ink-2);
+        transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+          box-shadow var(--t-fast) var(--ease);
+      }
+
+      .controls button:hover {
+        background: rgba(20, 21, 28, 0.06);
+        color: var(--ink-1);
+      }
+
+      .controls button[aria-pressed="true"] {
+        background: var(--surface);
+        color: var(--ink-1);
+        box-shadow: var(--shadow-card);
+      }
+
+      /* 模拟浏览器 */
+      .browser {
+        position: relative;
+        flex: 1;
+        margin: 0 20px 20px;
+        border-radius: 14px;
+        background: #fff;
+        box-shadow: 0 0 0 1px rgba(20, 21, 28, 0.08), 0 14px 36px -14px rgba(20, 21, 28, 0.16);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        min-height: 640px;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        height: 46px;
+        padding: 0 14px 0 16px;
+        background: #f5f6f9;
+        border-bottom: 1px solid rgba(20, 21, 28, 0.07);
+        flex: none;
+      }
+
+      .lights {
+        display: flex;
+        gap: 7px;
+      }
+
+      .lights i {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: #d8dae2;
+      }
+
+      .address {
+        flex: 1;
+        max-width: 560px;
+        height: 28px;
+        margin: 0 auto;
+        padding: 0 12px;
+        display: flex;
+        align-items: center;
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: 0 0 0 1px rgba(20, 21, 28, 0.07), 0 1px 2px rgba(20, 21, 28, 0.03);
+        font-size: 12px;
+        color: #646775;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+
+      .ext-btn {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+        transition: background-color var(--t-fast) var(--ease);
+      }
+
+      .ext-btn:hover,
+      .ext-btn[aria-expanded="true"] {
+        background: rgba(20, 21, 28, 0.07);
+      }
+
+      .ext-btn img {
+        display: block;
+        width: 20px;
+        height: 20px;
+        border-radius: 5.5px;
+      }
+
+      /* 弹出窗：模拟 Chrome 扩展弹窗的纯净白纸浮层 */
+      .popup {
+        position: absolute;
+        top: 54px;
+        right: 16px;
+        z-index: 10;
+        width: 348px;
+        border-radius: 26px;
+        overflow: hidden;
+        background: var(--surface);
+        box-shadow: 0 0 0 1px rgba(18, 18, 24, 0.045), 0 6px 18px -4px rgba(18, 18, 24, 0.06),
+          0 28px 64px -18px rgba(18, 18, 24, 0.16);
+        transform-origin: top right;
+        transition: opacity 150ms var(--ease), transform 180ms var(--ease);
+      }
+
+      .popup[hidden] {
+        display: block;
+        opacity: 0;
+        transform: translateY(-6px) scale(0.975);
+        pointer-events: none;
+      }
+
+      .popup iframe {
+        display: block;
+        width: 348px;
+        height: 360px;
+        border: 0;
+        transition: height var(--t-fast) var(--ease);
+      }
+
+      /* 模拟的飞书文档页 */
+      .doc-stage {
+        flex: 1;
+        overflow: auto;
+      }
+
+      .doc {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 64px 40px 120px;
+        color: #2b2a28;
+      }
+
+      .doc h1 {
+        font-size: 32px;
+        line-height: 1.3;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+
+      .doc .by {
+        margin-top: 12px;
+        font-size: 13px;
+        color: #6f6b65;
+      }
+
+      .doc h2 {
+        margin: 40px 0 12px;
+        font-size: 20px;
+        font-weight: 600;
+      }
+
+      .doc p {
+        margin: 10px 0;
+        font-size: 15px;
+        line-height: 1.75;
+        color: #3a3936;
+      }
+
+      .doc figure {
+        margin: 20px 0;
+      }
+
+      .doc figure img {
+        display: block;
+        width: 100%;
+        border-radius: 6px;
+        box-shadow: 0 0 0 1px rgba(38, 37, 35, 0.08);
+      }
+
+      .doc .plain {
+        display: grid;
+        place-items: center;
+        min-height: 480px;
+        color: #6f6b65;
+        font-size: 15px;
+      }
+
+      .note {
+        margin: 0 20px 16px;
+        font-size: 12px;
+        color: var(--ink-2);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls" role="group" aria-label="预览场景">
+      <span class="label">场景</span>
+      <button type="button" data-scenario="default" aria-pressed="true">缓存来自另一篇文档</button>
+      <button type="button" data-scenario="empty" aria-pressed="false">缓存为空</button>
+      <button type="button" data-scenario="same" aria-pressed="false">当前页就是来源</button>
+      <button type="button" data-scenario="stale" aria-pressed="false">快照已过期</button>
+      <button type="button" data-scenario="images" aria-pressed="false">缓存只有图片</button>
+      <button type="button" data-scenario="unsupported" aria-pressed="false">非飞书页面</button>
+    </div>
+
+    <div class="browser">
+      <div class="toolbar">
+        <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div class="address" id="address"></div>
+        <button class="ext-btn" id="ext-btn" type="button" aria-label="飞书文档迁移" aria-expanded="true">
+          <img src="extension/icons/icon.svg" alt="" aria-hidden="true" />
+        </button>
+      </div>
+
+      <div class="popup" id="popup">
+        <iframe id="popup-frame" title="飞书文档迁移弹出窗" src="extension/popup/popup.html?scenario=default"></iframe>
+      </div>
+
+      <div class="doc-stage" id="stage">
+        <article class="doc" id="doc"></article>
+      </div>
+    </div>
+
+    <p class="note">预览页仅用于查看界面与交互，数据均为模拟。点击工具栏右侧的图标开关弹出窗，点击页面空白处会像真实弹窗一样关闭。</p>
+
+    <script src="preview/mock-images.js"></script>
+    <script src="extension/content/image-panel.js"></script>
+    <script>
+      (() => {
+        const popup = document.getElementById('popup');
+        const frame = document.getElementById('popup-frame');
+        const extBtn = document.getElementById('ext-btn');
+        const address = document.getElementById('address');
+        const doc = document.getElementById('doc');
+        const stage = document.getElementById('stage');
+        const images = window.FDM_MOCK_IMAGES;
+
+        const PAGES = {
+          source: {
+            url: 'acme.feishu.cn/docx/Kx7pQ2mRwB',
+            title: '2026 Q4 产品路线图',
+          },
+          target: {
+            url: 'newco.feishu.cn/docx/Vn3tLe8sHa',
+            title: 'Q4 产品路线图（迁移副本）',
+          },
+        };
+        const PAGE_OF = { default: 'target', images: 'target', empty: 'source', same: 'source', stale: 'source' };
+
+        function renderDoc(scenario) {
+          const key = PAGE_OF[scenario];
+          if (!key) {
+            address.textContent = 'www.example.com';
+            doc.innerHTML = '<div class="plain">一个普通网页</div>';
+            return;
+          }
+          const p = PAGES[key];
+          address.textContent = p.url;
+          const fig = (i) => `<figure><img src="${images[i].src}" alt="${images[i].name}"></figure>`;
+          doc.innerHTML = `
+            <h1>${p.title}</h1>
+            <p class="by">产品部 · 最后编辑于今天 14:20</p>
+            <h2>一、季度目标</h2>
+            <p>本季度聚焦三件事：完成新版协作编辑的灰度、把移动端首屏加载压到 1.2 秒以内，以及上线面向企业管理员的审计日志。</p>
+            ${fig(0)}
+            <p>营收结构与上季度基本持平，订阅收入占比提升 4 个百分点，渠道收入下降主要来自代理商合同到期。</p>
+            <h2>二、关键路径</h2>
+            ${fig(2)}
+            <p>迁移流程分四步：盘点存量文档、导出结构快照、按空间批量导入、抽样核对格式。每一步都设置了回滚点。</p>
+            ${fig(1)}
+            <h2>三、界面改版</h2>
+            ${fig(3)}
+            <p>后台设置页重新整理了分组，常用的成员管理和权限配置提到第一屏。</p>`;
+        }
+
+        function setPopup(open) {
+          popup.hidden = !open;
+          extBtn.setAttribute('aria-expanded', String(open));
+        }
+
+        function setScenario(name) {
+          document.querySelectorAll('[data-scenario]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scenario === name)));
+          frame.src = `extension/popup/popup.html?scenario=${name}`;
+          renderDoc(name);
+          setPopup(true);
+        }
+
+        document.querySelector('.controls').addEventListener('click', (e) => {
+          const b = e.target.closest('[data-scenario]');
+          if (b) setScenario(b.dataset.scenario);
+        });
+
+        extBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setPopup(popup.hidden);
+        });
+
+        stage.addEventListener('mousedown', () => setPopup(false));
+
+        window.addEventListener('message', (e) => {
+          const msg = e.data || {};
+          if (msg.type === 'fdm:popup-height') frame.style.height = `${msg.height}px`;
+          if (msg.type === 'fdm:open-image-panel') {
+            setPopup(false);
+            const list = images.slice(0, msg.count);
+            window.FDMImagePanel.open({
+              images: new Promise((r) => setTimeout(() => r(list), 450)),
+              replaceTitle: msg.replaceTitle,
+              onExtract: async (selected) => frame.contentWindow.postMessage({ type: 'fdm:images-extracted', count: selected.length }, '*'),
+            });
+          }
+        });
+
+        frame.addEventListener('load', () => {
+          const script = frame.contentDocument.createElement('script');
+          script.src = new URL('preview/popup-demo.js', location.href).href;
+          frame.contentDocument.body.appendChild(script);
+        });
+
+        renderDoc('default');
+        if (new URLSearchParams(location.search).get('panel') === 'open') {
+          setPopup(false);
+          window.FDMImagePanel.open({
+            images: images.slice(0, 8),
+            replaceTitle: PAGES.source.title,
+            onExtract: async (selected) => frame.contentWindow.postMessage({ type: 'fdm:images-extracted', count: selected.length }, '*'),
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

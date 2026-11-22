@@ -2,13 +2,13 @@
 'use strict';
 
 // Best-effort reload for the unpacked Feishu helper extension in a running
-// Chrome/Canary CDP session. Build should still succeed if the browser is not
+// Chrome CDP session. Build should still succeed if the browser is not
 // open, the extension target is asleep, or Chrome internals change.
 
 const http = require('http');
 
 const EXTENSION_ID = require('../extension/extension-identity.json').extensionId;
-const PORT = Number(process.env.FEISHU_EXTENSION_CDP_PORT || process.env.CDP_PORT || 9223);
+const PORT = Number(process.env.FEISHU_EXTENSION_CDP_PORT || process.env.CDP_PORT || 9222);
 const HOST = process.env.FEISHU_EXTENSION_CDP_HOST || '127.0.0.1';
 
 function requestJson(pathname) {

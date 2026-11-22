@@ -108,7 +108,7 @@
     });
   }
 
-  function collectDocumentImageRecords(rootBlock) {
+  function collectDocumentImageRecords(rootBlock, select) {
     var records = [];
     var pending = [rootBlock];
     var visited = new Set();
@@ -118,7 +118,7 @@
       visited.add(block);
       var record = block.record;
       var snapshot = record && record.snapshot;
-      if (record && snapshot && snapshot.type === 'image' && snapshot.image) records.push(record);
+      if (record && snapshot && snapshot.type === 'image' && snapshot.image) records.push(select ? select(block) : record);
       var children = block.children || [];
       for (var i = children.length - 1; i >= 0; i--) pending.push(children[i]);
     }
