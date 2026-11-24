@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/readme/hero.svg" width="100%" alt="飞书文档助手 — 用于飞书 / Lark 文档提取、粘贴与跨账号迁移的 Chrome 扩展">
+  <img src="./assets/readme/hero.svg" width="100%" alt="飞书文档助手：先提取，再粘贴，把整篇文档搬到另一个账号">
 </p>
 
 <p align="center">
